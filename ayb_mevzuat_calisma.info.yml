@@ -1,0 +1,12 @@
+name: AYB Mevzuat Çalışma Alanı
+type: module
+description: 'Mevzuat taslakları, madde bazlı çalışma ve editör çalışma alanı.'
+package: AYB
+core_version_requirement: ^10 || ^11
+dependencies:
+  - drupal:node
+  - drupal:media
+  - drupal:media_library
+  - drupal:content_moderation
+  - drupal:views
+  - field_group:field_group

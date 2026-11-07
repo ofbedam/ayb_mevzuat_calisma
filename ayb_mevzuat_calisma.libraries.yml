@@ -1,0 +1,21 @@
+draft:
+  css:
+    theme:
+      css/draft.css: {}
+      css/tree.css: {}
+      css/print.css: {}
+  js:
+    js/draft-preview.js: {}
+  dependencies:
+    - core/drupal
+    - core/once
+
+workspace:
+  css:
+    theme:
+      css/workspace.css: {}
+  js:
+    js/workspace.js: {}
+  dependencies:
+    - ayb_mevzuat_calisma/draft
+    - core/drupal.dialog.ajax

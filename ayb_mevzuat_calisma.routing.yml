@@ -1,0 +1,263 @@
+ayb_mevzuat_calisma.draft_workspace:
+  path: '/admin/content/mevzuat-taslaklari'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::overview'
+    _title: 'Mevzuat Taslakları Çalışma Alanı'
+  requirements:
+    _permission: 'access ayb drafting workspace'
+  options:
+    _admin_route: TRUE
+
+ayb_mevzuat_calisma.snapshot_create:
+  path: '/admin/content/mevzuat-taslaklari/{draft}/snapshot/yeni'
+  defaults:
+    _form: '\Drupal\ayb_mevzuat_calisma\Form\DraftSnapshotForm'
+    _title: 'Editoryal sürüm oluştur'
+  requirements:
+    _permission: 'create ayb draft snapshots'
+    draft: '\d+'
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+
+ayb_mevzuat_calisma.snapshot_list:
+  path: '/admin/content/mevzuat-taslaklari/{draft}/snapshotlar'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::editorialList'
+    _title_callback: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::editorialListTitle'
+  requirements:
+    _permission: 'access ayb drafting workspace'
+    draft: '\d+'
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+
+ayb_mevzuat_calisma.snapshot_view:
+  path: '/mevzuat-snapshot/{snapshot}'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::view'
+    _title_callback: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::snapshotTitle'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::snapshotAccess'
+    snapshot: '\d+'
+
+ayb_mevzuat_calisma.public_snapshot_list:
+  path: '/mevzuat-snapshot/taslak/{draft}'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::publicList'
+    _title_callback: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::publicListTitle'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::publicListAccess'
+    draft: '\d+'
+  options:
+    parameters:
+      draft:
+        type: entity:node
+
+ayb_mevzuat_calisma.snapshot_compare:
+  path: '/mevzuat-snapshot/{first}/karsilastir/{second}'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::compare'
+    _title_callback: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::compareTitle'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftSnapshotController::compareAccess'
+    first: '\d+'
+    second: '\d+'
+
+ayb_mevzuat_calisma.snapshot_action:
+  path: '/admin/content/mevzuat-taslaklari/snapshot/{snapshot}/{action}'
+  defaults:
+    _form: '\Drupal\ayb_mevzuat_calisma\Form\DraftSnapshotActionForm'
+    _title: 'Kamu sürümü işlemi'
+  requirements:
+    _permission: 'publish ayb draft snapshots'
+    snapshot: '\d+'
+    action: 'publish|withdraw'
+  options:
+    _admin_route: TRUE
+
+ayb_mevzuat_calisma.workspace_draft:
+  path: '/admin/content/mevzuat-taslaklari/{draft}'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::draft'
+    _title_callback: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::draftTitle'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::draftAccess'
+    draft: '\d+'
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+        load_latest_revision: TRUE
+      article:
+        type: entity:node
+        load_latest_revision: TRUE
+
+ayb_mevzuat_calisma.workspace_article:
+  path: '/admin/content/mevzuat-taslaklari/{draft}/madde/{article}'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::article'
+    _title_callback: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::articleTitle'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::articleAccess'
+    draft: '\d+'
+    article: '\d+'
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+        load_latest_revision: TRUE
+      article:
+        type: entity:node
+        load_latest_revision: TRUE
+
+ayb_mevzuat_calisma.workspace_consolidation:
+  path: '/admin/content/mevzuat-taslaklari/{draft}/konsolidasyon'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::consolidation'
+    _title: 'Taslak görüş ve öneri konsolidasyonu'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::consolidationAccess'
+    draft: '\d+'
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+
+ayb_mevzuat_calisma.workspace_reorder:
+  path: '/admin/content/mevzuat-taslaklari/{draft}/sira'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftWorkspaceController::reorder'
+  requirements:
+    draft: '\d+'
+  methods: [POST]
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+
+ayb_mevzuat_calisma.workspace_draft_moderation:
+  path: '/admin/content/mevzuat-taslaklari/{draft}/moderasyon'
+  defaults:
+    _form: '\Drupal\ayb_mevzuat_calisma\Form\DraftWorkflowTransitionForm'
+    _title: 'Taslak çalışma durumu'
+  requirements:
+    _custom_access: 'ayb_mevzuat_calisma_workflow_access'
+    draft: '\d+'
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+
+ayb_mevzuat_calisma.workspace_article_moderation:
+  path: '/admin/content/mevzuat-taslaklari/{draft}/madde/{article}/moderasyon'
+  defaults:
+    _form: '\Drupal\ayb_mevzuat_calisma\Form\DraftWorkflowTransitionForm'
+    _title: 'Madde çalışma durumu'
+  requirements:
+    _custom_access: 'ayb_mevzuat_calisma_article_workflow_access'
+    draft: '\d+'
+    article: '\d+'
+  options:
+    _admin_route: TRUE
+    parameters:
+      draft:
+        type: entity:node
+      article:
+        type: entity:node
+
+ayb_mevzuat_calisma.draft_article_quick_edit:
+  path: '/node/{node}/taslak-madde-hizli-duzenle'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftInlineEditController::edit'
+    _title: 'Maddeyi hızlı düzenle'
+  requirements:
+    _custom_access: 'ayb_mevzuat_calisma_quick_edit_access'
+    node: '\d+'
+  options:
+    _node_operation_route: TRUE
+    parameters:
+      node:
+        type: entity:node
+        load_latest_revision: TRUE
+
+ayb_mevzuat_calisma.draft_article_order:
+  path: '/node/{node}/taslak-madde-siralama'
+  defaults:
+    _form: '\Drupal\ayb_mevzuat_calisma\Form\DraftArticleOrderingForm'
+    _title: 'Madde sıralaması'
+  requirements:
+    _custom_access: 'ayb_mevzuat_calisma_draft_order_access'
+    node: '\d+'
+  options:
+    _node_operation_route: TRUE
+    parameters:
+      node:
+        type: entity:node
+
+ayb_mevzuat_calisma.revision_compare:
+  path: '/node/{node}/revisions/compare'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftRevisionComparisonController::compare'
+    _title: 'Taslak sürümlerini karşılaştır'
+  requirements:
+    _entity_access: 'node.view all revisions'
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftRevisionComparisonController::access'
+    node: '\d+'
+  options:
+    _node_operation_route: TRUE
+    parameters:
+      node:
+        type: entity:node
+
+ayb_mevzuat_calisma.draft_preview:
+  path: '/node/{node}/taslak-preview'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftPreviewController::preview'
+    _title: 'Taslak önizleme'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftPreviewController::access'
+    node: '\d+'
+  options:
+    _node_operation_route: TRUE
+    parameters:
+      node:
+        type: entity:node
+
+ayb_mevzuat_calisma.draft_preview_download:
+  path: '/node/{node}/taslak-preview/download/{format}'
+  defaults:
+    _controller: '\Drupal\ayb_mevzuat_calisma\Controller\DraftPreviewController::download'
+  requirements:
+    _custom_access: '\Drupal\ayb_mevzuat_calisma\Controller\DraftPreviewController::access'
+    node: '\d+'
+    format: 'word|pdf'
+  options:
+    _node_operation_route: TRUE
+    parameters:
+      node:
+        type: entity:node
+
+ayb_mevzuat_calisma.suggestion_decision:
+  path: '/node/{suggestion}/taslak-onerisi/{decision}'
+  defaults:
+    _form: '\Drupal\ayb_mevzuat_calisma\Form\DraftSuggestionDecisionForm'
+    _title: 'Taslak önerisi kararı'
+  requirements:
+    _permission: 'manage ayb draft suggestions'
+    suggestion: '\d+'
+    decision: 'accept|reject'
+  options:
+    parameters:
+      suggestion:
+        type: entity:node
+

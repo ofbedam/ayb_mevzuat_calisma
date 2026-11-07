@@ -1,0 +1,402 @@
+<?php
+
+/**
+ * Installs the legislative drafting workspace and its model field.
+ */
+
+/** Implements hook_install(). */
+function ayb_mevzuat_calisma_install(): void {
+  if (!\Drupal\node\Entity\NodeType::load('mevzuat_taslagi')) {
+    throw new \RuntimeException('Önce Mevzuat Taslağı içerik türünün yapılandırmasını yükleyin.');
+  }
+
+  $storage = \Drupal\field\Entity\FieldStorageConfig::loadByName('node', 'field_taslak_calisma_modeli');
+  if (!$storage) {
+    $storage = \Drupal\field\Entity\FieldStorageConfig::create([
+      'field_name' => 'field_taslak_calisma_modeli',
+      'entity_type' => 'node',
+      'type' => 'list_string',
+      'cardinality' => 1,
+      'settings' => ['allowed_values' => [
+        'tam_metin' => 'Tam metin',
+        'madde_bazli' => 'Madde bazlı',
+      ]],
+    ]);
+    $storage->save();
+  }
+
+  $field = \Drupal\field\Entity\FieldConfig::loadByName('node', 'mevzuat_taslagi', 'field_taslak_calisma_modeli');
+  if (!$field) {
+    $field = \Drupal\field\Entity\FieldConfig::create([
+      'field_name' => 'field_taslak_calisma_modeli',
+      'entity_type' => 'node',
+      'bundle' => 'mevzuat_taslagi',
+      'label' => 'Taslak çalışma modeli',
+      'required' => TRUE,
+      'translatable' => FALSE,
+      'default_value' => [['value' => 'tam_metin']],
+      'description' => 'Tam metin modelinde belgenin tamamı tek alanda tutulur. Madde bazlı modelde bölüm ve madde kayıtları ana kaynaktır; tam metin bu kayıtlardan oluşturulur.',
+    ]);
+    $field->save();
+  }
+  else {
+    $field->setRequired(TRUE)
+      ->setTranslatable(FALSE)
+      ->setDefaultValue([['value' => 'tam_metin']])
+      ->save();
+  }
+
+  $display_repository = \Drupal::service('entity_display.repository');
+  $form_display = $display_repository->getFormDisplay('node', 'mevzuat_taslagi', 'default');
+  $form_display->setComponent('field_taslak_calisma_modeli', ['type' => 'options_buttons', 'weight' => -5])->save();
+  $view_display = $display_repository->getViewDisplay('node', 'mevzuat_taslagi', 'default');
+  if (!$view_display->getComponent('field_taslak_calisma_modeli')) {
+    $view_display->setComponent('field_taslak_calisma_modeli', ['type' => 'list_default', 'label' => 'above', 'weight' => -5])->save();
+  }
+  if (function_exists('field_group_load_field_group') && function_exists('field_group_group_save')) {
+    $group = field_group_load_field_group('group_taslak_kunye', 'node', 'mevzuat_taslagi', 'form', 'default');
+    if ($group && !in_array('field_taslak_calisma_modeli', $group->children, TRUE)) {
+      array_unshift($group->children, 'field_taslak_calisma_modeli');
+      field_group_group_save($group, $form_display);
+    }
+  }
+
+  foreach (\Drupal::entityQuery('node')->accessCheck(FALSE)->condition('type', 'mevzuat_taslagi')->execute() as $id) {
+    $draft = \Drupal\node\Entity\Node::load($id);
+    if ($draft && $draft->get('field_taslak_calisma_modeli')->isEmpty()) {
+      $draft->set('field_taslak_calisma_modeli', 'tam_metin')->save();
+    }
+  }
+
+  $editor = \Drupal\user\Entity\Role::load('content_editor');
+  if ($editor) {
+    $permissions = [
+      'access ayb drafting workspace', 'view any unpublished content', 'view all revisions',
+      'create mevzuat_taslagi content', 'edit any mevzuat_taslagi content',
+      'create mevzuat_taslak_maddesi content', 'edit any mevzuat_taslak_maddesi content',
+      'create mevzuat_taslak_gorusu content', 'edit any mevzuat_taslak_gorusu content',
+      'use ayb_taslak_editorial transition hazirla',
+      'use ayb_taslak_editorial transition incelemeye_gonder',
+      'use ayb_taslak_editorial transition gorus_ac',
+      'use ayb_taslak_editorial transition revize_et',
+      'use ayb_taslak_editorial transition taslaga_dondur',
+    ];
+    foreach (['draft', 'incelemede', 'goruste', 'revize'] as $state) {
+      $permissions[] = 'use ayb_taslak_editorial transition kaydet_' . $state;
+    }
+    $available = \Drupal::service('user.permissions')->getPermissions();
+    foreach ($permissions as $permission) {
+      if (isset($available[$permission])) {
+        $editor->grantPermission($permission);
+      }
+    }
+    $editor->save();
+  }
+  $administrator = \Drupal\user\Entity\Role::load('administrator');
+  if ($administrator) {
+    $administrator->grantPermission('access ayb drafting workspace')->save();
+  }
+}
+
+/** Adds configurable article-number formatting to draft documents. */
+function ayb_mevzuat_calisma_update_8001(): void {
+  $storage = \Drupal\field\Entity\FieldStorageConfig::loadByName('node', 'field_taslak_numara_gosterim');
+  if (!$storage) {
+    $storage = \Drupal\field\Entity\FieldStorageConfig::create([
+      'field_name' => 'field_taslak_numara_gosterim',
+      'entity_type' => 'node',
+      'type' => 'list_string',
+      'cardinality' => 1,
+      'settings' => ['allowed_values' => [
+        'buyuk' => 'MADDE 1-',
+        'normal' => 'Madde 1',
+        'sadece_numara' => '1',
+        'gizli' => 'Gösterme',
+      ]],
+    ]);
+    $storage->save();
+  }
+  $field = \Drupal\field\Entity\FieldConfig::loadByName('node', 'mevzuat_taslagi', 'field_taslak_numara_gosterim');
+  if (!$field) {
+    $field = \Drupal\field\Entity\FieldConfig::create([
+      'field_name' => 'field_taslak_numara_gosterim',
+      'entity_type' => 'node',
+      'bundle' => 'mevzuat_taslagi',
+      'label' => 'Madde numarası gösterimi',
+      'required' => TRUE,
+      'translatable' => FALSE,
+      'default_value' => [['value' => 'buyuk']],
+      'description' => 'Önizleme, Word, PDF ve İçindekiler görünümünde madde numarasının nasıl gösterileceğini belirler.',
+    ]);
+    $field->save();
+  }
+  else {
+    $field->setRequired(TRUE)->setDefaultValue([['value' => 'buyuk']])->save();
+  }
+  $repository = \Drupal::service('entity_display.repository');
+  $repository->getFormDisplay('node', 'mevzuat_taslagi', 'default')
+    ->setComponent('field_taslak_numara_gosterim', ['type' => 'options_buttons', 'weight' => -3])
+    ->save();
+  $repository->getViewDisplay('node', 'mevzuat_taslagi', 'default')
+    ->setComponent('field_taslak_numara_gosterim', ['type' => 'list_default', 'label' => 'above', 'weight' => -3])
+    ->save();
+  if (function_exists('field_group_load_field_group') && function_exists('field_group_group_save')) {
+    $display = $repository->getFormDisplay('node', 'mevzuat_taslagi', 'default');
+    $group = field_group_load_field_group('group_taslak_kunye', 'node', 'mevzuat_taslagi', 'form', 'default');
+    if ($group && !in_array('field_taslak_numara_gosterim', $group->children, TRUE)) {
+      $position = array_search('field_taslak_baslik_hizalama', $group->children, TRUE);
+      if ($position === FALSE) {
+        $group->children[] = 'field_taslak_numara_gosterim';
+      }
+      else {
+        array_splice($group->children, $position + 1, 0, ['field_taslak_numara_gosterim']);
+      }
+      field_group_group_save($group, $display);
+    }
+  }
+  foreach (\Drupal::entityQuery('node')->accessCheck(FALSE)->condition('type', 'mevzuat_taslagi')->execute() as $id) {
+    $draft = \Drupal\node\Entity\Node::load($id);
+    if ($draft && $draft->get('field_taslak_numara_gosterim')->isEmpty()) {
+      $draft->set('field_taslak_numara_gosterim', 'buyuk')->save();
+    }
+  }
+}
+
+/** Adds LEOS-inspired, maddeye bağlı öneri kayıtları. */
+function ayb_mevzuat_calisma_update_8002(): void {
+  $entity_type_manager = \Drupal::entityTypeManager();
+  if (!\Drupal\node\Entity\NodeType::load('mevzuat_taslak_onerisi')) {
+    \Drupal\node\Entity\NodeType::create([
+      'type' => 'mevzuat_taslak_onerisi',
+      'name' => 'Madde önerisi',
+      'description' => 'Mevzuat maddelerine bağlı, kabul veya ret kararı verilebilen editoryal öneriler.',
+      'new_revision' => TRUE,
+      'display_submitted' => TRUE,
+    ])->save();
+  }
+
+  $fields = [
+    'field_tslk_oneri_taslak' => [
+      'type' => 'entity_reference', 'label' => 'Üst taslak', 'required' => TRUE,
+      'settings' => ['target_type' => 'node', 'handler' => 'default', 'handler_settings' => ['target_bundles' => ['mevzuat_taslagi' => 'mevzuat_taslagi']]],
+    ],
+    'field_tslk_oneri_madde' => [
+      'type' => 'entity_reference', 'label' => 'İlgili madde', 'required' => TRUE,
+      'settings' => ['target_type' => 'node', 'handler' => 'default', 'handler_settings' => ['target_bundles' => ['mevzuat_taslak_maddesi' => 'mevzuat_taslak_maddesi']]],
+    ],
+    'field_tslk_oneri_turu' => [
+      'type' => 'list_string', 'label' => 'Öneri türü', 'required' => TRUE,
+      'settings' => ['allowed_values' => ['hukuki' => 'Hukukî değerlendirme', 'dil' => 'Dil ve yazım önerisi', 'teknik' => 'Teknik öneri', 'editor' => 'Editör notu']],
+    ],
+    'field_tslk_oneri_durum' => [
+      'type' => 'list_string', 'label' => 'Öneri durumu', 'required' => TRUE,
+      'settings' => ['allowed_values' => ['acik' => 'Açık', 'inceleniyor' => 'İnceleniyor', 'kabul' => 'Kabul edildi', 'ret' => 'Reddedildi', 'arsiv' => 'Arşivlendi']],
+      'default_value' => [['value' => 'acik']],
+    ],
+    'field_tslk_oneri_alan' => [
+      'type' => 'list_string', 'label' => 'Uygulanacak alan', 'required' => TRUE,
+      'settings' => ['allowed_values' => ['oneri' => 'Önerilen madde metni', 'nihai' => 'Nihai madde metni', 'gerekce' => 'Madde gerekçesi']],
+      'default_value' => [['value' => 'oneri']],
+    ],
+    'field_tslk_oneri_eski' => ['type' => 'text_long', 'label' => 'Mevcut ifade', 'required' => FALSE],
+    'field_tslk_oneri_yeni' => ['type' => 'text_long', 'label' => 'Önerilen ifade', 'required' => TRUE],
+    'field_tslk_oneri_gerekce' => ['type' => 'text_long', 'label' => 'Öneri gerekçesi', 'required' => TRUE],
+  ];
+  foreach ($fields as $name => $definition) {
+    $storage = \Drupal\field\Entity\FieldStorageConfig::loadByName('node', $name);
+    if (!$storage) {
+      $storage = \Drupal\field\Entity\FieldStorageConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'type' => $definition['type'],
+        'cardinality' => 1,
+        'settings' => $definition['settings'] ?? [],
+      ]);
+      $storage->save();
+    }
+    if (!\Drupal\field\Entity\FieldConfig::loadByName('node', 'mevzuat_taslak_onerisi', $name)) {
+      $config = \Drupal\field\Entity\FieldConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'bundle' => 'mevzuat_taslak_onerisi',
+        'label' => $definition['label'],
+        'required' => $definition['required'],
+        'translatable' => TRUE,
+        'default_value' => $definition['default_value'] ?? [],
+      ]);
+      $config->save();
+    }
+  }
+  $display = \Drupal::service('entity_display.repository');
+  $form = $display->getFormDisplay('node', 'mevzuat_taslak_onerisi', 'default');
+  foreach (array_keys($fields) as $weight => $name) {
+    $form->setComponent($name, ['type' => str_starts_with($name, 'field_tslk_oneri_') && in_array($name, ['field_tslk_oneri_turu', 'field_tslk_oneri_durum', 'field_tslk_oneri_alan'], TRUE) ? 'options_buttons' : 'entity_reference_autocomplete', 'weight' => $weight]);
+  }
+  $form->setComponent('field_tslk_oneri_eski', ['type' => 'text_textarea', 'weight' => 5]);
+  $form->setComponent('field_tslk_oneri_yeni', ['type' => 'text_textarea', 'weight' => 6]);
+  $form->setComponent('field_tslk_oneri_gerekce', ['type' => 'text_textarea', 'weight' => 7]);
+  $form->save();
+  $view = $display->getViewDisplay('node', 'mevzuat_taslak_onerisi', 'default');
+  foreach (array_keys($fields) as $weight => $name) {
+    $view->setComponent($name, ['type' => $fields[$name]['type'] === 'entity_reference' ? 'entity_reference_label' : ($fields[$name]['type'] === 'text_long' ? 'text_default' : 'list_default'), 'label' => 'above', 'weight' => $weight]);
+  }
+  $view->save();
+  foreach (['administrator', 'content_editor'] as $role_id) {
+    if ($role = \Drupal\user\Entity\Role::load($role_id)) {
+      foreach (['manage ayb draft suggestions', 'create mevzuat_taslak_onerisi content', 'edit any mevzuat_taslak_onerisi content', 'delete any mevzuat_taslak_onerisi content'] as $permission) {
+        $role->grantPermission($permission);
+      }
+      $role->save();
+    }
+  }
+}
+
+/**
+ * Adds an explicit parent relation to draft structure records.
+ *
+ * Existing records are migrated conservatively from the old type/order based
+ * tree. No record is deleted and an uncertain record remains at the draft
+ * root instead of being attached to a possibly incorrect parent.
+ */
+function ayb_mevzuat_calisma_update_8003(): void {
+  $storage = \Drupal\field\Entity\FieldStorageConfig::loadByName('node', 'field_taslak_ust_kayit');
+  if (!$storage) {
+    $storage = \Drupal\field\Entity\FieldStorageConfig::create([
+      'field_name' => 'field_taslak_ust_kayit',
+      'entity_type' => 'node',
+      'type' => 'entity_reference',
+      'cardinality' => 1,
+      'settings' => [
+        'target_type' => 'node',
+        'handler' => 'default',
+        'handler_settings' => ['target_bundles' => ['mevzuat_taslak_maddesi' => 'mevzuat_taslak_maddesi']],
+      ],
+    ]);
+    $storage->save();
+  }
+  if (!\Drupal\field\Entity\FieldConfig::loadByName('node', 'mevzuat_taslak_maddesi', 'field_taslak_ust_kayit')) {
+    \Drupal\field\Entity\FieldConfig::create([
+      'field_name' => 'field_taslak_ust_kayit',
+      'entity_type' => 'node',
+      'bundle' => 'mevzuat_taslak_maddesi',
+      'label' => 'Üst bölüm / başlık',
+      'description' => 'Bu kaydın hangi bölüm veya başlık altında görüneceğini belirler. Boş bırakılırsa taslak kökünde görünür.',
+      'required' => FALSE,
+      'translatable' => FALSE,
+    ])->save();
+  }
+
+  $repository = \Drupal::service('entity_display.repository');
+  $repository->getFormDisplay('node', 'mevzuat_taslak_maddesi', 'default')
+    ->setComponent('field_taslak_ust_kayit', ['type' => 'entity_reference_autocomplete', 'weight' => -3])
+    ->save();
+  $repository->getViewDisplay('node', 'mevzuat_taslak_maddesi', 'default')
+    ->setComponent('field_taslak_ust_kayit', ['type' => 'entity_reference_label', 'label' => 'above', 'weight' => -3])
+    ->save();
+
+  $storage_handler = \Drupal::entityTypeManager()->getStorage('node');
+  $draft_ids = \Drupal::entityQuery('node')->accessCheck(FALSE)->condition('type', 'mevzuat_taslagi')->execute();
+  $migrated = 0;
+  foreach ($draft_ids as $draft_id) {
+    $ids = \Drupal::entityQuery('node')->accessCheck(FALSE)
+      ->condition('type', 'mevzuat_taslak_maddesi')
+      ->condition('field_taslak_madde_taslak', $draft_id)
+      ->sort('field_taslak_madde_sira', 'ASC')
+      ->sort('nid', 'ASC')
+      ->execute();
+    $records = $ids ? $storage_handler->loadMultiple($ids) : [];
+    $current = ['kisim' => NULL, 'bolum' => NULL, 'baslik' => NULL];
+    foreach ($records as $record) {
+      if (!$record->hasField('field_taslak_ust_kayit') || !$record->get('field_taslak_ust_kayit')->isEmpty()) {
+        continue;
+      }
+      $type = (string) ($record->get('field_taslak_kayit_turu')->value ?: 'madde');
+      $parent = NULL;
+      if ($type === 'kisim') {
+        $current = ['kisim' => $record, 'bolum' => NULL, 'baslik' => NULL];
+      }
+      elseif ($type === 'bolum') {
+        $parent = $current['kisim'];
+        $current['bolum'] = $record;
+        $current['baslik'] = NULL;
+      }
+      elseif (in_array($type, ['alt_baslik', 'madde_basligi'], TRUE)) {
+        $parent = $current['bolum'] ?: $current['kisim'];
+        $current['baslik'] = $record;
+      }
+      elseif ($type === 'madde') {
+        $parent = $current['baslik'] ?: ($current['bolum'] ?: $current['kisim']);
+      }
+      if ($parent && (int) $parent->id() !== (int) $record->id()) {
+        $record->set('field_taslak_ust_kayit', ['target_id' => $parent->id()]);
+        $record->save();
+        $migrated++;
+      }
+    }
+  }
+  \Drupal::logger('ayb_mevzuat_calisma')->notice('Taslak hiyerarşisi oluşturuldu: @count kayıt açık üst kayıt ilişkisiyle güncellendi.', ['@count' => $migrated]);
+}
+
+/** Adds the top-level Kitap record type to the draft hierarchy. */
+function ayb_mevzuat_calisma_update_8004(): void {
+  $storage = \Drupal\field\Entity\FieldStorageConfig::loadByName('node', 'field_taslak_kayit_turu');
+  if (!$storage || $storage->getType() !== 'list_string') {
+    \Drupal::logger('ayb_mevzuat_calisma')->warning('Kitap kayıt türü eklenemedi: field_taslak_kayit_turu alanı bulunamadı veya list_string değil.');
+    return;
+  }
+  $settings = $storage->getSettings();
+  $allowed = $settings['allowed_values'] ?? [];
+  if (!isset($allowed['kitap'])) {
+    $settings['allowed_values'] = ['kitap' => 'Kitap'] + $allowed;
+    $storage->setSettings($settings)->save();
+  }
+  \Drupal::logger('ayb_mevzuat_calisma')->notice('Taslak kayıt türlerine Kitap seçeneği eklendi.');
+}
+
+/** Ensures the record-type selector itself remains optional. */
+function ayb_mevzuat_calisma_update_8005(): void {
+  $field = \Drupal\field\Entity\FieldConfig::loadByName('node', 'mevzuat_taslak_maddesi', 'field_taslak_kayit_turu');
+  if ($field) {
+    $field->setRequired(FALSE)->save();
+  }
+  \Drupal::logger('ayb_mevzuat_calisma')->notice('Taslak kayıt türü alanı zorunlu olmaktan çıkarıldı; Kitap yalnızca ihtiyaç halinde seçilebilir.');
+}
+
+/** Creates immutable editorial/public snapshot storage for draft documents. */
+function ayb_mevzuat_calisma_update_8006(): void {
+  $schema = \Drupal::database()->schema();
+  if (!$schema->tableExists('ayb_draft_snapshot')) {
+    $schema->createTable('ayb_draft_snapshot', [
+      'description' => 'Immutable snapshots of legislative draft documents.',
+      'fields' => [
+        'snapshot_id' => ['type' => 'serial', 'not null' => TRUE],
+        'draft_nid' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+        'uid' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+        'created' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+        'visibility' => ['type' => 'varchar', 'length' => 16, 'not null' => TRUE, 'default' => 'editorial'],
+        'state' => ['type' => 'varchar', 'length' => 16, 'not null' => TRUE, 'default' => 'active'],
+        'label' => ['type' => 'varchar', 'length' => 255, 'not null' => TRUE],
+        'summary' => ['type' => 'text', 'size' => 'big', 'not null' => FALSE],
+        'payload' => ['type' => 'text', 'size' => 'big', 'not null' => TRUE],
+      ],
+      'primary key' => ['snapshot_id'],
+      'indexes' => ['draft_created' => ['draft_nid', 'created'], 'visibility_state' => ['visibility', 'state']],
+    ]);
+  }
+}
+
+/** Grants snapshot operations to the existing editorial and administrator roles. */
+function ayb_mevzuat_calisma_update_8007(): void {
+  foreach (['content_editor', 'administrator'] as $role_id) {
+    $role = \Drupal\user\Entity\Role::load($role_id);
+    if ($role) {
+      $role->grantPermission('create ayb draft snapshots');
+      $role->grantPermission('access ayb drafting workspace');
+      if ($role_id === 'administrator') {
+        $role->grantPermission('publish ayb draft snapshots');
+      }
+      $role->save();
+    }
+  }
+}
+

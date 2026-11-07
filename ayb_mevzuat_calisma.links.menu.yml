@@ -1,0 +1,6 @@
+ayb_mevzuat_calisma.draft_workspace:
+  title: 'Mevzuat Taslakları Çalışma Alanı'
+  description: 'Taslakları, madde çalışmalarını ve görüş sürecini yönetin.'
+  route_name: ayb_mevzuat_calisma.draft_workspace
+  parent: system.admin_content
+  weight: 4

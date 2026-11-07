@@ -1,0 +1,1368 @@
+<?php
+
+require_once __DIR__ . '/includes/draft.inc';
+
+/** Implements hook_theme(). */
+function ayb_mevzuat_calisma_theme(array $existing, string $type, string $theme, string $path): array {
+  return [
+    'ayb_mevzuat_calisma_workspace_toolbar' => [
+      'variables' => [
+        'kind' => NULL,
+        'metadata' => NULL,
+        'actions' => NULL,
+      ],
+      'template' => 'ayb-mevzuat-calisma-workspace-toolbar',
+      'path' => $path . '/templates',
+    ],
+    'ayb_mevzuat_calisma_section_nav' => [
+      'variables' => [
+        'label' => NULL,
+        'items' => NULL,
+      ],
+      'template' => 'ayb-mevzuat-calisma-section-nav',
+      'path' => $path . '/templates',
+    ],
+    'ayb_mevzuat_calisma_diff_legend' => [
+      'variables' => [
+        'delete_label' => NULL,
+        'insert_label' => NULL,
+      ],
+      'template' => 'ayb-mevzuat-calisma-diff-legend',
+      'path' => $path . '/templates',
+    ],
+    'ayb_mevzuat_calisma_consolidation_matrix' => [
+      'variables' => [
+        'attributes' => NULL,
+        'navigation' => NULL,
+        'intro' => NULL,
+        'back' => NULL,
+        'filters' => NULL,
+        'bulk' => NULL,
+        'table' => NULL,
+      ],
+      'template' => 'ayb-mevzuat-calisma-consolidation-matrix',
+      'path' => $path . '/templates',
+    ],
+    'ayb_mevzuat_calisma_draft_paper' => [
+      'variables' => [
+        'attributes' => NULL,
+        'title' => NULL,
+        'body' => NULL,
+      ],
+      'template' => 'ayb-mevzuat-calisma-draft-paper',
+      'path' => $path . '/templates',
+    ],
+    'ayb_mevzuat_calisma_context_navigation' => [
+      'variables' => ['title' => NULL, 'subtitle' => NULL, 'home_url' => NULL, 'meta' => NULL, 'tabs' => NULL, 'actions' => NULL, 'attributes' => NULL],
+      'template' => 'ayb-mevzuat-calisma-context-navigation',
+      'path' => $path . '/templates',
+    ],
+  ];
+}
+
+/** Assigns a stable display order to newly added draft records. */
+function ayb_mevzuat_calisma_entity_presave(\Drupal\Core\Entity\EntityInterface $entity): void {
+  if (!$entity instanceof \Drupal\node\NodeInterface
+    || !$entity->isNew()
+    || $entity->bundle() !== 'mevzuat_taslak_maddesi'
+    || !$entity->hasField('field_taslak_madde_sira')
+    || !$entity->get('field_taslak_madde_sira')->isEmpty()
+    || !$entity->hasField('field_taslak_madde_taslak')
+    || $entity->get('field_taslak_madde_taslak')->isEmpty()) {
+    return;
+  }
+  $parent_id = (int) $entity->get('field_taslak_madde_taslak')->target_id;
+  $query = \Drupal::entityQuery('node')
+    ->accessCheck(FALSE)
+    ->condition('type', 'mevzuat_taslak_maddesi')
+    ->condition('field_taslak_madde_taslak', $parent_id);
+  if ($entity->hasField('field_taslak_ust_kayit') && !$entity->get('field_taslak_ust_kayit')->isEmpty()) {
+    $query->condition('field_taslak_ust_kayit', (int) $entity->get('field_taslak_ust_kayit')->target_id);
+  }
+  else {
+    $query->notExists('field_taslak_ust_kayit');
+  }
+  $query
+    ->sort('field_taslak_madde_sira', 'DESC')
+    ->range(0, 1);
+  $ids = $query->execute();
+  $last_order = 0;
+  if ($ids) {
+    $last = \Drupal\node\Entity\Node::load((int) reset($ids));
+    $last_order = $last && is_numeric($last->get('field_taslak_madde_sira')->value) ? (int) $last->get('field_taslak_madde_sira')->value : 0;
+  }
+  $entity->set('field_taslak_madde_sira', max(10, $last_order + 10));
+}
+
+/** Returns draft records grouped by their explicit parent relation. */
+function ayb_mevzuat_calisma_hierarchy(\Drupal\node\NodeInterface $draft, array $records): array {
+  return \Drupal::service('ayb_mevzuat_calisma.hierarchy')->build($draft, $records);
+}
+
+/** Flattens the explicit draft hierarchy in document order. */
+function ayb_mevzuat_calisma_hierarchy_flatten(array $hierarchy, int $parent_id = 0, int $depth = 0, array &$visited = []): array {
+  return \Drupal::service('ayb_mevzuat_calisma.hierarchy')->flatten($hierarchy, $parent_id, $depth, $visited);
+}
+
+/** Formats an article number consistently across all draft outputs. */
+function ayb_mevzuat_calisma_article_number_label(?\Drupal\node\NodeInterface $draft, string $number): string {
+  if ($number === '') {
+    return '';
+  }
+  $mode = $draft && $draft->hasField('field_taslak_numara_gosterim')
+    ? (string) $draft->get('field_taslak_numara_gosterim')->value
+    : 'buyuk';
+  return match ($mode) {
+    'normal' => (string) t('Madde @number', ['@number' => $number]),
+    'sadece_numara' => $number,
+    'gizli' => '',
+    default => (string) t('MADDE @number-', ['@number' => $number]),
+  };
+}
+
+/** Grants access to ordering records belonging to an editable draft. */
+function ayb_mevzuat_calisma_draft_order_access(\Drupal\node\NodeInterface $node, \Drupal\Core\Session\AccountInterface $account): \Drupal\Core\Access\AccessResultInterface {
+  return \Drupal\Core\Access\AccessResult::allowedIf($node->bundle() === 'mevzuat_taslagi' && $node->access('update', $account))
+    ->addCacheableDependency($node)
+    ->cachePerUser();
+}
+
+/** Implements hook_views_query_alter(). */
+function ayb_mevzuat_calisma_views_query_alter(\Drupal\views\ViewExecutable $view, \Drupal\views\Plugin\views\query\QueryPluginBase $query): void {
+  // Keep only draft workflow records out of the general content inventory.
+  if (in_array($view->id(), ['content', 'icerik_2'], TRUE) && $view->current_display === 'page_1') {
+    $query->addWhere(0, 'node_field_data.type', [
+      'mevzuat_taslagi',
+      'mevzuat_taslak_maddesi',
+      'mevzuat_taslak_gorusu',
+      'mevzuat_taslak_onerisi',
+    ], 'NOT IN');
+  }
+}
+
+/** Detects all public, editorial, and Drupal form routes in the draft flow. */
+function ayb_mevzuat_calisma_is_draft_context_route(\Drupal\Core\Routing\RouteMatchInterface $route_match): bool {
+  $route = (string) $route_match->getRouteName();
+  $draft_routes = [
+    'ayb_mevzuat_calisma.draft_workspace',
+    'ayb_mevzuat_calisma.workspace_draft',
+    'ayb_mevzuat_calisma.workspace_article',
+    'ayb_mevzuat_calisma.workspace_consolidation',
+    'ayb_mevzuat_calisma.snapshot_create',
+    'ayb_mevzuat_calisma.snapshot_list',
+    'ayb_mevzuat_calisma.snapshot_view',
+    'ayb_mevzuat_calisma.public_snapshot_list',
+    'ayb_mevzuat_calisma.snapshot_compare',
+    'ayb_mevzuat_calisma.snapshot_action',
+    'ayb_mevzuat_calisma.workspace_draft_moderation',
+    'ayb_mevzuat_calisma.workspace_article_moderation',
+    'ayb_mevzuat_calisma.draft_article_order',
+    'ayb_mevzuat_calisma.draft_article_quick_edit',
+    'ayb_mevzuat_calisma.revision_compare',
+    'ayb_mevzuat_calisma.draft_preview',
+    'ayb_mevzuat_calisma.draft_preview_download',
+    'ayb_mevzuat_calisma.suggestion_decision',
+  ];
+  if (in_array($route, $draft_routes, TRUE)) {
+    return TRUE;
+  }
+  foreach (['node', 'draft', 'article', 'suggestion'] as $parameter) {
+    $entity = $route_match->getParameter($parameter);
+    if ($entity instanceof \Drupal\node\NodeInterface && in_array($entity->bundle(), ['mevzuat_taslagi', 'mevzuat_taslak_maddesi', 'mevzuat_taslak_gorusu', 'mevzuat_taslak_onerisi'], TRUE)) {
+      return TRUE;
+    }
+  }
+  $node_type = $route_match->getParameter('node_type');
+  if (is_object($node_type) && method_exists($node_type, 'id')) {
+    $node_type = $node_type->id();
+  }
+  return in_array($node_type, ['mevzuat_taslagi', 'mevzuat_taslak_maddesi', 'mevzuat_taslak_gorusu', 'mevzuat_taslak_onerisi'], TRUE);
+}
+
+/** Applies one shared layout and style layer to every draft-related page. */
+function ayb_mevzuat_calisma_preprocess_html(array &$variables): void {
+  $route_match = \Drupal::routeMatch();
+  if (!ayb_mevzuat_calisma_is_draft_context_route($route_match)) {
+    return;
+  }
+  $variables['attributes']['class'][] = 'ayb-draft-wide-page';
+  if (in_array($route_match->getRouteName(), ['ayb_mevzuat_calisma.draft_workspace', 'ayb_mevzuat_calisma.workspace_draft', 'ayb_mevzuat_calisma.workspace_article'], TRUE)) {
+    $variables['attributes']['class'][] = 'ayb-mevzuat-workspace-page';
+  }
+}
+
+/** Ensures admin/Gin and public/AYB pages load the same drafting design layer. */
+function ayb_mevzuat_calisma_page_attachments(array &$attachments): void {
+  $route_match = \Drupal::routeMatch();
+  if (!ayb_mevzuat_calisma_is_draft_context_route($route_match)) {
+    return;
+  }
+  $attachments['#attached']['library'][] = 'ayb_mevzuat_calisma/draft';
+  if (in_array($route_match->getRouteName(), ['ayb_mevzuat_calisma.draft_workspace', 'ayb_mevzuat_calisma.workspace_draft', 'ayb_mevzuat_calisma.workspace_article'], TRUE)) {
+    $attachments['#attached']['library'][] = 'ayb_mevzuat_calisma/workspace';
+  }
+}
+
+/** Adds the shared context menu to full-page Drupal revision screens. */
+function ayb_mevzuat_calisma_page_top(array &$page_top): void {
+  $route_match = \Drupal::routeMatch();
+  if (!in_array($route_match->getRouteName(), ['entity.node.version_history', 'entity.node.revision', 'entity.node.revision_revert_confirm', 'entity.node.revision_delete_confirm'], TRUE)) {
+    return;
+  }
+  $request = \Drupal::request();
+  if ($request->isXmlHttpRequest() || in_array($request->query->get('_wrapper_format'), ['drupal_ajax', 'drupal_modal'], TRUE)) {
+    return;
+  }
+  $node = $route_match->getParameter('node');
+  if (!$node instanceof \Drupal\node\NodeInterface) {
+    return;
+  }
+  $draft = NULL;
+  $article = NULL;
+  if ($node->bundle() === 'mevzuat_taslagi') {
+    $draft = $node;
+  }
+  elseif ($node->bundle() === 'mevzuat_taslak_maddesi' && $node->hasField('field_taslak_madde_taslak')) {
+    $draft = $node->get('field_taslak_madde_taslak')->entity;
+    $article = $node;
+  }
+  elseif ($node->bundle() === 'mevzuat_taslak_gorusu' && $node->hasField('field_taslak_gorus_taslak')) {
+    $draft = $node->get('field_taslak_gorus_taslak')->entity;
+    $article = $node->hasField('field_taslak_gorus_madde') ? $node->get('field_taslak_gorus_madde')->entity : NULL;
+  }
+  elseif ($node->bundle() === 'mevzuat_taslak_onerisi' && $node->hasField('field_tslk_oneri_taslak')) {
+    $draft = $node->get('field_tslk_oneri_taslak')->entity;
+    $article = $node->hasField('field_tslk_oneri_madde') ? $node->get('field_tslk_oneri_madde')->entity : NULL;
+  }
+  if ($draft instanceof \Drupal\node\NodeInterface) {
+    $navigation = \Drupal::service('ayb_mevzuat_calisma.context_navigation')->build($draft, 'history', $article, FALSE, $node);
+    if ($navigation) {
+      $navigation['#weight'] = -1000;
+      $page_top['ayb_draft_revision_context_navigation'] = $navigation;
+    }
+  }
+}
+
+/** Adds draft-specific parent context and form guidance. */
+function ayb_mevzuat_calisma_add_form_context_navigation(array &$form, \Drupal\Core\Form\FormStateInterface $form_state): void {
+  $route_match = \Drupal::routeMatch();
+  $route_name = (string) $route_match->getRouteName();
+  if (in_array($route_name, ['ayb_mevzuat_calisma.draft_article_quick_edit', 'ayb_mevzuat_calisma.draft_preview', 'ayb_mevzuat_calisma.revision_compare', 'ayb_mevzuat_calisma.suggestion_decision'], TRUE)) {
+    return;
+  }
+  $form_object = $form_state->getFormObject();
+  $entity = $form_object && method_exists($form_object, 'getEntity') ? $form_object->getEntity() : NULL;
+  $draft = $route_match->getParameter('draft');
+  $article = $route_match->getParameter('article');
+  $route_node = $route_match->getParameter('node');
+  if (!$article instanceof \Drupal\node\NodeInterface && $route_node instanceof \Drupal\node\NodeInterface && $route_node->bundle() === 'mevzuat_taslak_maddesi') {
+    $article = $route_node;
+  }
+  if (!$draft instanceof \Drupal\node\NodeInterface && $route_node instanceof \Drupal\node\NodeInterface && $route_node->bundle() === 'mevzuat_taslagi') {
+    $draft = $route_node;
+  }
+  if (!$draft instanceof \Drupal\node\NodeInterface && $entity instanceof \Drupal\node\NodeInterface) {
+    if ($entity->bundle() === 'mevzuat_taslagi') {
+      $draft = $entity;
+    }
+    elseif ($entity->bundle() === 'mevzuat_taslak_maddesi' && $entity->hasField('field_taslak_madde_taslak')) {
+      $article = $entity->isNew() ? NULL : $entity;
+      $draft = $entity->get('field_taslak_madde_taslak')->entity;
+    }
+    elseif ($entity->bundle() === 'mevzuat_taslak_gorusu' && $entity->hasField('field_taslak_gorus_taslak')) {
+      $draft = $entity->get('field_taslak_gorus_taslak')->entity;
+    }
+    elseif ($entity->bundle() === 'mevzuat_taslak_onerisi' && $entity->hasField('field_tslk_oneri_taslak')) {
+      $draft = $entity->get('field_tslk_oneri_taslak')->entity;
+      $article = $entity->hasField('field_tslk_oneri_madde') ? $entity->get('field_tslk_oneri_madde')->entity : NULL;
+    }
+  }
+  if (!$draft instanceof \Drupal\node\NodeInterface && $route_name === 'ayb_mevzuat_calisma.snapshot_action') {
+    $snapshot = \Drupal::database()->select('ayb_draft_snapshot', 's')->fields('s', ['draft_nid'])->condition('snapshot_id', (int) $route_match->getParameter('snapshot'))->execute()->fetchField();
+    $draft = $snapshot ? \Drupal::entityTypeManager()->getStorage('node')->load($snapshot) : NULL;
+  }
+  if (!$draft instanceof \Drupal\node\NodeInterface && $entity instanceof \Drupal\node\NodeInterface && in_array($entity->bundle(), ['mevzuat_taslak_maddesi', 'mevzuat_taslak_gorusu', 'mevzuat_taslak_onerisi'], TRUE)) {
+    $parent_id = \Drupal::request()->query->get('taslak');
+    if (is_scalar($parent_id) && ctype_digit((string) $parent_id)) {
+      $draft = \Drupal\node\Entity\Node::load((int) $parent_id);
+      if ($entity->bundle() === 'mevzuat_taslak_maddesi') {
+        $article = $entity->isNew() ? NULL : $entity;
+      }
+      elseif (in_array($entity->bundle(), ['mevzuat_taslak_gorusu', 'mevzuat_taslak_onerisi'], TRUE)) {
+        $related_id = \Drupal::request()->query->get('madde');
+        $article = is_scalar($related_id) && ctype_digit((string) $related_id)
+          ? \Drupal\node\Entity\Node::load((int) $related_id)
+          : NULL;
+      }
+    }
+  }
+  $active = match ($route_name) {
+    'ayb_mevzuat_calisma.workspace_consolidation' => 'reviews',
+    'ayb_mevzuat_calisma.snapshot_list', 'ayb_mevzuat_calisma.snapshot_create', 'ayb_mevzuat_calisma.snapshot_action' => 'snapshots',
+    'entity.node.version_history', 'entity.node.revision', 'entity.node.revision_revert_confirm', 'entity.node.revision_delete_confirm' => 'history',
+    default => 'workspace',
+  };
+  $navigation = NULL;
+  if ($entity instanceof \Drupal\node\NodeInterface && $entity->bundle() === 'mevzuat_taslagi' && $entity->isNew()) {
+    if (\Drupal::currentUser()->hasPermission('access ayb drafting workspace')) {
+      $navigation = \Drupal::service('ayb_mevzuat_calisma.context_navigation')->buildOverview();
+    }
+  }
+  elseif ($draft instanceof \Drupal\node\NodeInterface) {
+    $revision_target = $entity instanceof \Drupal\node\NodeInterface && !$entity->isNew()
+      ? $entity
+      : ($route_node instanceof \Drupal\node\NodeInterface ? $route_node : NULL);
+    $navigation = \Drupal::service('ayb_mevzuat_calisma.context_navigation')->build($draft, $active, $article instanceof \Drupal\node\NodeInterface ? $article : NULL, FALSE, $revision_target);
+  }
+  if ($navigation) {
+    $navigation['#weight'] = -1000;
+    $form['ayb_draft_context_navigation'] = $navigation;
+  }
+}
+
+/** Adds draft-specific parent context and form guidance. */
+function ayb_mevzuat_calisma_form_alter(array &$form, \Drupal\Core\Form\FormStateInterface $form_state, string $form_id): void {
+  // Add the shared contextual menu to node forms and standalone management
+  // forms (snapshot, moderation, and ordering) before bundle-specific alters.
+  ayb_mevzuat_calisma_add_form_context_navigation($form, $form_state);
+  $form_object = $form_state->getFormObject();
+  if (!$form_object || !method_exists($form_object, 'getEntity')) {
+    return;
+  }
+  $entity = $form_object->getEntity();
+
+  if ($entity->getEntityTypeId() === 'node'
+    && in_array($entity->bundle(), ['mevzuat_taslagi', 'mevzuat_taslak_maddesi', 'mevzuat_taslak_gorusu'], TRUE)) {
+    if (!$entity->isNew()) {
+      $lock_manager = \Drupal::service('ayb_mevzuat_calisma.lock');
+      $lock_acquired = $lock_manager->acquire($entity);
+      if ($form_state->get('ayb_draft_base_revision') === NULL) {
+        $form_state->set('ayb_draft_base_revision', $entity->getRevisionId());
+      }
+      $form['#validate'][] = 'ayb_mevzuat_calisma_edit_lock_validate';
+      if (!$lock_acquired) {
+        $owner = $lock_manager->ownerName($entity);
+        $form['ayb_mevzuat_calisma_lock_notice'] = [
+          '#type' => 'container',
+          '#weight' => -100,
+          '#attributes' => ['class' => ['messages', 'messages--warning', 'ayb-draft-lock-notice']],
+          'text' => ['#plain_text' => t('Bu kayıt şu anda @owner tarafından düzenleniyor. Kaydetme işlemi kilit kaldırılana kadar engellenecektir.', ['@owner' => $owner ?: t('başka bir kullanıcı')])],
+        ];
+      }
+    }
+    if (in_array(\Drupal::routeMatch()->getRouteName(), ['entity.node.edit_form', 'ayb_mevzuat_calisma.draft_article_quick_edit', 'ayb_mevzuat_calisma.workspace_article'], TRUE)
+      && $entity->bundle() === 'mevzuat_taslak_maddesi'
+      && $entity->hasField('moderation_state')
+      && in_array((string) $entity->get('moderation_state')->value, ['published', 'arsiv'], TRUE)) {
+      ayb_mevzuat_calisma_prepare_locked_article_form($form, $entity);
+      $form['#validate'][] = 'ayb_mevzuat_calisma_prevent_locked_article_edit_validate';
+    }
+    ayb_mevzuat_calisma_update_form_element($form, 'revision_log', static function (array &$element): void {
+      $element['#title'] = t('Bu sürümde yapılan değişiklik');
+      $element['#description'] = t('Kısa bir kayıt özeti yazın. Örnek: “Madde 4’te başvuru süresi 30 günden 45 güne çıkarıldı.” Bu not revizyon geçmişinde görünür.');
+      $element['#attributes']['placeholder'] = t('Değişikliği kısaca açıklayın');
+      $element['#attributes']['class'][] = 'ayb-draft-revision-log';
+    });
+  }
+
+  if ($entity->getEntityTypeId() === 'node' && $entity->bundle() === 'mevzuat_taslak_onerisi') {
+    $taslak_id = \Drupal::request()->query->get('taslak');
+    $madde_id = \Drupal::request()->query->get('madde');
+    foreach ([[$taslak_id, 'field_tslk_oneri_taslak', 'mevzuat_taslagi'], [$madde_id, 'field_tslk_oneri_madde', 'mevzuat_taslak_maddesi']] as [$target_id, $field_name, $bundle]) {
+      if ($entity->isNew() && is_scalar($target_id) && ctype_digit((string) $target_id)) {
+        $target = \Drupal\node\Entity\Node::load((int) $target_id);
+        if ($target && $target->bundle() === $bundle && $target->access('view')) {
+          $entity->set($field_name, $target);
+          ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element) use ($target): void {
+            $element['widget'][0]['target_id']['#default_value'] = $target;
+          });
+        }
+      }
+    }
+    ayb_mevzuat_calisma_update_form_element($form, 'field_tslk_oneri_durum', static function (array &$element): void {
+      $element['#access'] = FALSE;
+    });
+    return;
+  }
+
+  if ($entity->getEntityTypeId() === 'node'
+    && in_array($entity->bundle(), ['mevzuat_taslak_maddesi', 'mevzuat_taslak_gorusu'], TRUE)) {
+    $parent_id = \Drupal::request()->query->get('taslak');
+    if (is_scalar($parent_id) && ctype_digit((string) $parent_id)) {
+      $parent = \Drupal\node\Entity\Node::load($parent_id);
+      if ($parent && $parent->bundle() === 'mevzuat_taslagi' && $parent->access('update')) {
+        $field_name = $entity->bundle() === 'mevzuat_taslak_maddesi' ? 'field_taslak_madde_taslak' : 'field_taslak_gorus_taslak';
+        if ($entity->isNew()) {
+          $entity->set($field_name, $parent);
+          ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element) use ($parent): void {
+            $element['widget'][0]['target_id']['#default_value'] = $parent;
+          });
+        }
+        $article_id = \Drupal::request()->query->get('madde');
+        if ($entity->bundle() === 'mevzuat_taslak_gorusu' && is_scalar($article_id) && ctype_digit((string) $article_id)) {
+          $article = \Drupal\node\Entity\Node::load($article_id);
+          if ($entity->isNew() && $article && $article->access('update') && $article->bundle() === 'mevzuat_taslak_maddesi'
+            && (string) $article->get('field_taslak_madde_taslak')->target_id === (string) $parent->id()) {
+            if ($entity->isNew()) {
+              $entity->set('field_taslak_gorus_madde', $article);
+            }
+            ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_gorus_madde', static function (array &$element) use ($article): void {
+              $element['widget'][0]['target_id']['#default_value'] = $article;
+            });
+          }
+        }
+        if ($entity->bundle() === 'mevzuat_taslak_maddesi') {
+          $upper_id = \Drupal::request()->query->get('ust');
+          if ($entity->isNew() && is_scalar($upper_id) && ctype_digit((string) $upper_id)) {
+            $upper = \Drupal\node\Entity\Node::load((int) $upper_id);
+            if ($upper && $upper->bundle() === 'mevzuat_taslak_maddesi'
+              && (int) $upper->get('field_taslak_madde_taslak')->target_id === (int) $parent->id()
+              && $upper->access('update')) {
+              $entity->set('field_taslak_ust_kayit', $upper);
+              ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_ust_kayit', static function (array &$element) use ($upper): void {
+                if (isset($element['widget'][0]['target_id'])) {
+                  $element['widget'][0]['target_id']['#default_value'] = $upper;
+                }
+              });
+            }
+          }
+        }
+      }
+    }
+    ayb_mevzuat_calisma_enhance_draft_child_form($form, $entity);
+    if (\Drupal::request()->attributes->get('ayb_mevzuat_calisma_quick_edit') === TRUE) {
+      ayb_mevzuat_calisma_prepare_quick_edit_form($form, $entity);
+    }
+    return;
+  }
+
+  if ($entity->getEntityTypeId() === 'node' && $entity->bundle() === 'mevzuat_taslagi') {
+    ayb_mevzuat_calisma_enhance_draft_form($form, $entity);
+    return;
+  }
+
+}
+
+/** Replaces a misleading save action on published and archived article forms. */
+function ayb_mevzuat_calisma_prepare_locked_article_form(array &$form, \Drupal\node\NodeInterface $article): void {
+  $draft = $article->hasField('field_taslak_madde_taslak') ? $article->get('field_taslak_madde_taslak')->entity : NULL;
+  $destination = $draft instanceof \Drupal\node\NodeInterface
+    ? \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.workspace_article', ['draft' => $draft->id(), 'article' => $article->id()])->toString()
+    : NULL;
+  $transition_url = $draft instanceof \Drupal\node\NodeInterface
+    ? \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.workspace_article_moderation', ['draft' => $draft->id(), 'article' => $article->id()], $destination ? ['query' => ['destination' => $destination]] : [])
+    : NULL;
+  $state = (string) $article->get('moderation_state')->value;
+  $message = $state === 'published'
+    ? t('Bu madde yayımlanmış sürümdür. Değişiklik yapmak için önce yeni bir taslak çalışma sürümü oluşturun. Yayımdaki metin, yeni sürüm yayımlanana kadar korunur.')
+    : t('Bu madde arşivdedir ve düzenlemeye kapalıdır. Çalışmaya devam etmek için önce durumunu değiştirerek taslağa döndürün.');
+  $form['ayb_mevzuat_calisma_locked_article_notice'] = [
+    '#type' => 'container',
+    '#weight' => -900,
+    '#attributes' => ['class' => ['messages', 'messages--warning', 'ayb-draft-locked-edit-notice'], 'role' => 'status'],
+    'message' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => $message],
+    'action' => $transition_url ? [
+      '#type' => 'link',
+      '#title' => $state === 'published' ? t('Yeni taslak sürümü oluştur') : t('Taslağa döndür'),
+      '#url' => $transition_url,
+      '#attributes' => ['class' => ['button', 'button--primary', 'ayb-draft-locked-edit-notice__action']],
+    ] : [],
+  ];
+
+  // Keep the record visible for context, but make it unmistakable that this
+  // revision cannot be changed in place. The transition form is the only path
+  // that creates a new working revision from a published/archived record.
+  foreach ($form as $key => &$element) {
+    if (!is_string($key) || !str_starts_with($key, 'field_') || !is_array($element)) {
+      continue;
+    }
+    ayb_mevzuat_calisma_disable_form_inputs($element);
+  }
+  unset($element);
+  if (isset($form['actions']['submit'])) {
+    $form['actions']['submit']['#access'] = FALSE;
+  }
+}
+
+/** Recursively disables interactive descendants of a locked entity field. */
+function ayb_mevzuat_calisma_disable_form_inputs(array &$element): void {
+  $interactive_types = ['textfield', 'textarea', 'select', 'checkbox', 'checkboxes', 'radio', 'radios', 'weight', 'number', 'date', 'datetime', 'email', 'url', 'password', 'managed_file', 'entity_autocomplete', 'text_format'];
+  if (in_array($element['#type'] ?? '', $interactive_types, TRUE)) {
+    $element['#disabled'] = TRUE;
+  }
+  foreach ($element as $key => &$child) {
+    if (is_string($key) && !str_starts_with($key, '#') && is_array($child)) {
+      ayb_mevzuat_calisma_disable_form_inputs($child);
+    }
+  }
+  unset($child);
+}
+
+/** Rejects a direct POST against a published/archived article revision. */
+function ayb_mevzuat_calisma_prevent_locked_article_edit_validate(array &$form, \Drupal\Core\Form\FormStateInterface $form_state): void {
+  $form_object = $form_state->getFormObject();
+  if (!$form_object || !method_exists($form_object, 'getEntity')) {
+    return;
+  }
+  $article = $form_object->getEntity();
+  if (!$article instanceof \Drupal\node\NodeInterface || $article->bundle() !== 'mevzuat_taslak_maddesi' || !$article->hasField('moderation_state')) {
+    return;
+  }
+  $source = isset($article->original) && $article->original instanceof \Drupal\node\NodeInterface ? $article->original : $article;
+  if (in_array((string) $source->get('moderation_state')->value, ['published', 'arsiv'], TRUE)) {
+    $form_state->setErrorByName('', t('Bu sürüm doğrudan düzenlenemez. Önce “Yeni taslak sürümü oluştur” veya “Taslağa döndür” geçişini tamamlayın; ardından çalışma alanında yeniden açın.'));
+  }
+}
+
+/** Prevents a stale or conflicting editor form from overwriting a record. */
+function ayb_mevzuat_calisma_edit_lock_validate(array &$form, \Drupal\Core\Form\FormStateInterface $form_state): void {
+  $form_object = $form_state->getFormObject();
+  if (!$form_object || !method_exists($form_object, 'getEntity')) {
+    return;
+  }
+  $entity = $form_object->getEntity();
+  if ($entity instanceof \Drupal\node\NodeInterface && !$entity->isNew() && !\Drupal::service('ayb_mevzuat_calisma.lock')->owns($entity)) {
+    $form_state->setErrorByName('title', t('Bu kayıt başka bir kullanıcı tarafından düzenleniyor. Önce diğer kullanıcının işlemini tamamlamasını bekleyin.'));
+  }
+  if ($entity instanceof \Drupal\node\NodeInterface && !$entity->isNew()) {
+    $latest_id = \Drupal::entityTypeManager()->getStorage('node')->getLatestRevisionId($entity->id());
+    $base_id = $form_state->get('ayb_draft_base_revision');
+    if ($base_id !== NULL && (string) $latest_id !== (string) $base_id) {
+      $form_state->setErrorByName('', t('Bu kayıt form açıldıktan sonra değiştirildi. Çalışmanızı kopyalayın, sayfayı yeniden açın ve sürümleri karşılaştırın.'));
+    }
+  }
+}
+
+/** Releases an editor lock after a node has been saved. */
+function ayb_mevzuat_calisma_node_update(\Drupal\node\NodeInterface $node): void {
+  if (in_array($node->bundle(), ['mevzuat_taslagi', 'mevzuat_taslak_maddesi', 'mevzuat_taslak_gorusu'], TRUE)) {
+    \Drupal::service('ayb_mevzuat_calisma.lock')->release($node);
+  }
+}
+
+/** Restricts the quick-edit route to editable draft article records. */
+function ayb_mevzuat_calisma_quick_edit_access(\Drupal\node\NodeInterface $node, \Drupal\Core\Session\AccountInterface $account): \Drupal\Core\Access\AccessResultInterface {
+  return \Drupal\Core\Access\AccessResult::allowedIf($node->bundle() === 'mevzuat_taslak_maddesi' && $node->access('update', $account))
+    ->addCacheableDependency($node)
+    ->cachePerUser();
+}
+
+/** Restricts the workspace moderation form to editable moderated nodes. */
+function ayb_mevzuat_calisma_workflow_access(\Drupal\node\NodeInterface $draft, \Drupal\Core\Session\AccountInterface $account): \Drupal\Core\Access\AccessResultInterface {
+  return \Drupal\Core\Access\AccessResult::allowedIf($draft->bundle() === 'mevzuat_taslagi' && $draft->access('update', $account) && \Drupal::service('content_moderation.moderation_information')->isModeratedEntity($draft))
+    ->addCacheableDependency($draft)
+    ->cachePerUser();
+}
+
+/** Restricts article moderation to an article belonging to the draft. */
+function ayb_mevzuat_calisma_article_workflow_access(\Drupal\node\NodeInterface $draft, \Drupal\node\NodeInterface $article, \Drupal\Core\Session\AccountInterface $account): \Drupal\Core\Access\AccessResultInterface {
+  $valid = $draft->bundle() === 'mevzuat_taslagi'
+    && $article->bundle() === 'mevzuat_taslak_maddesi'
+    && $article->hasField('field_taslak_madde_taslak')
+    && (int) $article->get('field_taslak_madde_taslak')->target_id === (int) $draft->id();
+  return \Drupal\Core\Access\AccessResult::allowedIf($valid && $article->access('update', $account) && \Drupal::service('content_moderation.moderation_information')->isModeratedEntity($article))
+    ->addCacheableDependency($draft)
+    ->addCacheableDependency($article)
+    ->cachePerUser();
+}
+
+/** Keeps only article content fields in the focused modal form. */
+function ayb_mevzuat_calisma_prepare_quick_edit_form(array &$form, \Drupal\node\NodeInterface $node): void {
+  $form['#attributes']['class'][] = 'ayb-draft-quick-edit-form';
+  unset($form['ayb_draft_child_intro'], $form['ayb_draft_child_section_nav']);
+  $form['ayb_draft_quick_edit_intro'] = [
+    '#type' => 'container', '#weight' => -100,
+    '#attributes' => ['class' => ['ayb-draft-quick-edit-form__header']],
+    'title' => ['#type' => 'html_tag', '#tag' => 'h2', '#value' => t('Madde içeriğini hızlı düzenle')],
+    'text' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => t('Bu ekranda yalnızca mevzuat metnine ve madde gerekçesine ilişkin alanlar gösterilir. Daha geniş çalışma için tam düzenleme sayfasını açın.')],
+  ];
+  foreach (['changed', 'advanced', 'created', 'langcode', 'moderation_state', 'path', 'status', 'title', 'uid', 'author', 'options', 'meta', 'menu', 'publish_state', 'unpublish_state', 'revision'] as $element_name) {
+    unset($form[$element_name]);
+  }
+  foreach (['title', 'field_taslak_madde_taslak', 'field_taslak_madde_mevcut', 'field_taslak_madde_belge_media'] as $field_name) {
+    ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element): void {
+      $element['#access'] = FALSE;
+    });
+  }
+  foreach (['ayb_draft_child_intro', 'ayb_draft_child_section_nav', 'ayb_draft_madde_guide', 'ayb_draft_child_stage'] as $element_name) {
+    unset($form[$element_name]);
+  }
+  if (isset($form['actions']['delete'])) {
+    $form['actions']['delete']['#access'] = FALSE;
+  }
+  if (isset($form['actions']['preview'])) {
+    $form['actions']['preview']['#access'] = FALSE;
+  }
+  if (isset($form['actions']['submit'])) {
+    $form['actions']['submit']['#value'] = t('Kaydet ve kapat');
+  }
+  $form['#submit'][] = 'ayb_mevzuat_calisma_quick_edit_submit';
+  $form['#attached']['library'][] = 'core/drupal.dialog.ajax';
+}
+
+/** Returns to the parent draft after a successful quick edit submission. */
+function ayb_mevzuat_calisma_quick_edit_submit(array &$form, \Drupal\Core\Form\FormStateInterface $form_state): void {
+  $node = $form_state->getFormObject()->getEntity();
+  if ($node instanceof \Drupal\node\NodeInterface && $node->hasField('field_taslak_madde_taslak') && ($parent = $node->get('field_taslak_madde_taslak')->entity)) {
+    $destination = \Drupal::request()->query->get('destination');
+    if (is_string($destination) && $destination !== '' && !\Drupal\Core\Url::fromUserInput($destination)->isExternal()) {
+      $form_state->setRedirectUrl(\Drupal\Core\Url::fromUserInput($destination));
+    }
+    else {
+      $form_state->setRedirect('entity.node.canonical', ['node' => $parent->id()]);
+    }
+  }
+}
+
+/** Adds modal revision links to a saved draft record's edit form. */
+function ayb_mevzuat_calisma_revision_form_actions(\Drupal\node\NodeInterface $node): array {
+  if ($node->isNew() || !\Drupal::currentUser()->hasPermission('view all revisions')) {
+    return ['#access' => FALSE];
+  }
+  $attributes = [
+    'class' => ['use-ajax', 'button', 'ayb-draft-workspace-toolbar__button'],
+    'data-dialog-type' => 'modal',
+    'data-dialog-options' => json_encode(['modal' => TRUE, 'draggable' => FALSE, 'resizable' => FALSE, 'closeOnEscape' => TRUE, 'width' => 1040, 'classes' => ['ui-dialog' => 'ayb-draft-drawer-dialog ayb-draft-revision-dialog']], JSON_UNESCAPED_SLASHES),
+  ];
+  $actions = [
+    '#type' => 'container',
+    '#attributes' => ['class' => ['ayb-draft-form-revision-actions'], 'aria-label' => t('Sürüm işlemleri')],
+    '#attached' => ['library' => ['core/drupal.dialog.ajax', 'ayb_mevzuat_calisma/draft']],
+    'history' => ['#type' => 'link', '#title' => t('Revizyon geçmişi'), '#url' => \Drupal\Core\Url::fromRoute('entity.node.version_history', ['node' => $node->id()]), '#attributes' => $attributes],
+  ];
+  if ($node->bundle() === 'mevzuat_taslagi' && $node->access('view')) {
+    $preview_attributes = $attributes;
+    $preview_attributes['class'][] = 'ayb-draft-workspace-toolbar__button--preview';
+    $preview_attributes['data-dialog-options'] = json_encode(['modal' => TRUE, 'draggable' => FALSE, 'resizable' => TRUE, 'minWidth' => 720, 'maxWidth' => '96vw', 'closeOnEscape' => TRUE, 'width' => 1120, 'classes' => ['ui-dialog' => 'ayb-draft-drawer-dialog ayb-draft-preview-dialog']], JSON_UNESCAPED_SLASHES);
+    $preview_attributes['aria-label'] = t('Taslağın güncel halini önizle');
+    $actions['preview'] = [
+      '#type' => 'link', '#title' => t('Önizlemeyi aç'),
+      '#url' => \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.draft_preview', ['node' => $node->id()]),
+      '#attributes' => $preview_attributes,
+    ];
+  }
+  $can_compare = in_array($node->bundle(), ['mevzuat_taslak_maddesi', 'mevzuat_taslak_gorusu'], TRUE)
+    || ($node->bundle() === 'mevzuat_taslagi' && $node->hasField('field_taslak_calisma_modeli') && $node->get('field_taslak_calisma_modeli')->value === 'tam_metin');
+  if ($can_compare) {
+    $actions['compare'] = ['#type' => 'link', '#title' => t('Sürümleri karşılaştır'), '#url' => \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.revision_compare', ['node' => $node->id()]), '#attributes' => $attributes];
+  }
+  return $actions;
+}
+
+/** Adds direct links to the main sections of the editorial form. */
+function ayb_mevzuat_calisma_form_section_nav(): array {
+  $items = [
+    'kunye' => t('Künye'),
+    'gerekce' => t('Gerekçe'),
+    'metin' => t('Metin'),
+    'gorus' => t('Görüş süreci'),
+  ];
+  $links = [];
+  foreach ($items as $id => $label) {
+    $links[$id] = [
+      '#type' => 'link',
+      '#title' => $label,
+      '#url' => \Drupal\Core\Url::fromUri('internal:#group-taslak-' . $id),
+    ];
+  }
+  return [
+    '#type' => 'container',
+    '#weight' => -90,
+    '#attributes' => ['class' => ['ayb-draft-form-section-nav'], 'aria-label' => t('Form bölümleri')],
+    'label' => ['#plain_text' => t('Bölüme git')],
+    'items' => ['#theme' => 'item_list', '#items' => $links],
+  ];
+}
+
+/** Adds the madde-based workflow guide directly inside Drupal forms. */
+function ayb_mevzuat_calisma_madde_form_guide(bool $compact = FALSE, ?bool $open = NULL): array {
+  // Forms keep the full guide visible, while view pages use the same guide as
+  // a closed, on-demand details panel.  NULL preserves the form defaults.
+  $open = $open ?? !$compact;
+  if ($compact) {
+    return [
+      '#type' => 'details',
+      '#title' => t('Bu madde nasıl ilerler?'),
+      '#open' => $open,
+      '#attributes' => ['class' => ['ayb-draft-form-guide', 'ayb-draft-form-guide--compact']],
+      'steps' => [
+        '#theme' => 'item_list',
+        '#items' => [
+          t('Madde metni ve gerekçeyi tamamlayın.'),
+          t('Hazır olduğunda “Hukukî incelemeye gönder” geçişini kullanın.'),
+          t('İnceleme sonunda nihai madde metnini girip maddeyi Yayında durumuna taşıyın.'),
+          t('Madde çıkarıldıysa Yayında yerine Arşiv durumunu kullanın.'),
+        ],
+      ],
+    ];
+  }
+  return [
+    '#type' => 'details',
+    '#title' => t('Madde bazlı çalışma yönergesi'),
+    '#open' => $open,
+    '#attributes' => ['class' => ['ayb-draft-form-guide', 'ayb-draft-form-guide--full']],
+    'intro' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => t('Ana taslakta bölüm, kısım ve maddeleri ayrı kayıtlar olarak hazırlayın. Ana taslak genel süreci, madde kayıtları ise hukukî metni yönetir.')],
+    'workflow_title' => ['#type' => 'html_tag', '#tag' => 'h3', '#value' => t('Önerilen işlem sırası')],
+    'workflow' => [
+      '#theme' => 'item_list',
+      '#items' => [
+        t('Ana taslağı Madde bazlı modeliyle kaydedin.'),
+        t('Madde, bölüm ve kısım kayıtlarını ana taslağa bağlayın; madde sırasını ayrıca belirtin.'),
+        t('Mevcut ve önerilen metinleri ayrı alanlara yazın; madde gerekçesini maddeye özgü tutun.'),
+        t('Maddeleri ayrı ayrı hukukî incelemeye gönderin.'),
+        t('İnceleme sonunda nihai madde metnini tamamlayın ve maddeyi Yayında veya Arşiv durumuna taşıyın.'),
+        t('Tüm maddeler uygun duruma geldikten sonra ana taslağı onaylayın.'),
+      ],
+    ],
+    'states_title' => ['#type' => 'html_tag', '#tag' => 'h3', '#value' => t('Madde durumlarının anlamı')],
+    'states' => [
+      '#theme' => 'item_list',
+      '#items' => [
+        t('Taslak: Madde üzerinde çalışma devam ediyor.'),
+        t('Hukukî incelemede: Madde inceleme için hazır.'),
+        t('Yayında: Madde kabul edilmiş son metne dahil edilebilir.'),
+        t('Arşiv: Madde aktif metinden çıkarılmıştır.'),
+      ],
+    ],
+    'note' => ['#type' => 'html_tag', '#tag' => 'p', '#attributes' => ['class' => ['ayb-draft-form-guide__note']], '#value' => t('Ana taslağın hukukî incelemeye gönderilebilmesi için gerçek maddeler en az Hukukî incelemede olmalıdır. Ana taslağın onaylanabilmesi için maddeler Yayında veya Arşiv durumunda olmalıdır.')],
+    'link' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => t('Ayrıntılı yönerge: MADDE_BAZLI_CALISMA_YONERGESI.md')],
+  ];
+}
+
+/** Adds parent context, field guidance, and focused sections to child forms. */
+function ayb_mevzuat_calisma_enhance_draft_child_form(array &$form, \Drupal\node\NodeInterface $node): void {
+  $bundle = $node->bundle();
+  $is_article = $bundle === 'mevzuat_taslak_maddesi';
+  $form['#attached']['library'][] = 'ayb_mevzuat_calisma/draft';
+  $form['#attributes']['class'][] = 'ayb-draft-form';
+  $form['#attributes']['class'][] = $is_article ? 'ayb-draft-form--article' : 'ayb-draft-form--opinion';
+  $parent_field = $is_article ? 'field_taslak_madde_taslak' : 'field_taslak_gorus_taslak';
+  $parent = $node->get($parent_field)->entity;
+  $query_parent = \Drupal::request()->query->get('taslak');
+  if (!$parent && is_scalar($query_parent) && ctype_digit((string) $query_parent)) {
+    $candidate = \Drupal\node\Entity\Node::load($query_parent);
+    if ($candidate && $candidate->bundle() === 'mevzuat_taslagi' && $candidate->access('update')) {
+      $parent = $candidate;
+    }
+  }
+  $title = $is_article
+    ? ($node->isNew() ? t('Taslak maddesi ekle') : t('Taslak maddesini düzenle'))
+    : ($node->isNew() ? t('Taslağa görüş kaydı ekle') : t('Görüş kaydını düzenle'));
+  $intro = $is_article
+    ? t('Bu kayıt tek bir taslak maddesini ve değişiklik gerekçesini izler. Numaralandırma veya bölüm başlığı değişse bile her maddeyi ayrı kaydedebilirsiniz.')
+    : t('Her görüşü ayrı kayıt olarak tutun. Görüşün hangi taslağa ve varsa hangi maddeye ilişkin olduğunu bağlayın; idarenin cevabı ve sonucu değerlendirme aşamasında doldurulur.');
+  $form['ayb_draft_child_intro'] = [
+    '#type' => 'container', '#weight' => -100,
+    '#attributes' => ['class' => ['ayb-draft-form-intro', 'ayb-draft-child-intro']],
+    'eyebrow' => ['#markup' => '<div class="ayb-draft-form-intro__eyebrow">AYB mevzuat çalışma alanı</div>'],
+    'title' => ['#markup' => '<h2>' . $title . '</h2>'],
+    'text' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => $intro],
+    'field_legend' => [
+      '#type' => 'container',
+      '#attributes' => ['class' => ['ayb-draft-field-legend'], 'aria-label' => t('Alanların kullanım özeti')],
+      'workspace' => [
+        '#type' => 'html_tag', '#tag' => 'div',
+        '#attributes' => ['class' => ['ayb-draft-field-legend__item', 'ayb-draft-field-legend__item--workspace']],
+        'title' => ['#type' => 'html_tag', '#tag' => 'strong', '#value' => t('Çalışma kaydı')],
+        'text' => ['#type' => 'html_tag', '#tag' => 'span', '#value' => t('Bağlantı, sıra ve mevcut metin gibi alanlar editoryal çalışma içindir; nihai metinde doğrudan görünmez.')],
+      ],
+      'substantive' => [
+        '#type' => 'html_tag', '#tag' => 'div',
+        '#attributes' => ['class' => ['ayb-draft-field-legend__item', 'ayb-draft-field-legend__item--substantive']],
+        'title' => ['#type' => 'html_tag', '#tag' => 'strong', '#value' => t('Mevzuat metni')],
+        'text' => ['#type' => 'html_tag', '#tag' => 'span', '#value' => t('Madde başlığı, önerilen/nihai metin ve madde gerekçesi taslağın metin içeriğini oluşturur.')],
+      ],
+    ],
+  ];
+  if ($parent) {
+    $form['ayb_draft_child_intro']['parent'] = [
+      '#type' => 'container', '#attributes' => ['class' => ['ayb-draft-parent-context']],
+      'label' => ['#plain_text' => t('Bağlı olduğu taslak')],
+      'link' => $parent->toLink()->toRenderable(),
+    ];
+    if ($is_article) {
+      $form['ayb_draft_child_intro']['navigation'] = ayb_mevzuat_calisma_draft_sibling_navigation($node, $parent);
+    }
+  }
+  $form['ayb_draft_child_intro']['revision_actions'] = ayb_mevzuat_calisma_revision_form_actions($node);
+  if ($parent) {
+    $workspace_url = $node->isNew()
+      ? \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.workspace_draft', ['draft' => $parent->id()])
+      : \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.workspace_article', ['draft' => $parent->id(), 'article' => $node->id()]);
+    $form['ayb_draft_child_intro']['navigation_actions'] = [
+      '#type' => 'container',
+      '#weight' => -5,
+      '#attributes' => ['class' => ['ayb-draft-form-navigation-actions']],
+      'workspace' => ['#type' => 'link', '#title' => t('Çalışma alanına dön'), '#url' => $workspace_url, '#attributes' => ['class' => ['button', 'button--small', 'button--secondary']]],
+    ];
+  }
+  if ($is_article) {
+    $form['ayb_draft_child_intro']['guide'] = ayb_mevzuat_calisma_madde_form_guide(TRUE);
+  }
+  $form['ayb_draft_child_intro']['stage'] = ayb_mevzuat_calisma_child_stage($node, $parent);
+  $child_section_groups = $is_article
+    ? ['group_taslak_madde_baglam' => t('Bağlam'), 'group_taslak_madde_metin' => t('Madde metni'), 'group_taslak_madde_deg' => t('Değişiklik')]
+    : ['group_taslak_gorus_baglam' => t('Bağlam'), 'group_taslak_gorus_kayit' => t('Görüş kaydı'), 'group_taslak_gorus_degerlendirme' => t('Değerlendirme')];
+  $child_section_links = [];
+  foreach ($child_section_groups as $child_group => $child_label) {
+    $child_section_links[$child_group] = [
+      '#type' => 'link', '#title' => $child_label,
+      '#url' => \Drupal\Core\Url::fromUri('internal:#group-taslak-' . str_replace('group_taslak_', '', $child_group)),
+    ];
+  }
+  $form['ayb_draft_child_section_nav'] = [
+    '#type' => 'container', '#weight' => -90,
+    '#attributes' => ['class' => ['ayb-draft-form-section-nav'], 'aria-label' => t('Form bölümleri')],
+    'label' => ['#plain_text' => t('Bölüme git')],
+    'items' => ['#theme' => 'item_list', '#items' => $child_section_links],
+  ];
+  ayb_mevzuat_calisma_update_form_element($form, 'title', static function (array &$element) use ($is_article): void {
+    $element['#title'] = $is_article ? t('Kayıt adı (çalışma başlığı)') : t('Görüş başlığı');
+    $element['#description'] = $is_article
+      ? t('Yalnızca çalışma alanında ve yönetim listelerinde kullanılan kısa addır. Nihai mevzuat metnindeki başlık için aşağıdaki “Madde başlığı” alanını doldurun.')
+      : t('Görüşü listede kolayca tanımak için kısa bir başlık yazın; kişi veya kurum bilgisini aşağıdaki alana girin.');
+    $element['#attributes']['class'][] = 'ayb-draft-title-field';
+  });
+  $group_names = $is_article
+    ? ['group_taslak_madde_baglam', 'group_taslak_madde_metin', 'group_taslak_madde_deg']
+    : ['group_taslak_gorus_baglam', 'group_taslak_gorus_kayit', 'group_taslak_gorus_degerlendirme'];
+  foreach ($group_names as $index => $group_name) {
+    ayb_mevzuat_calisma_update_form_element($form, $group_name, static function (array &$element) use ($group_name, $index, $is_article): void {
+      $element['#attributes']['class'][] = 'ayb-draft-form-group';
+      $element['#attributes']['class'][] = $is_article ? 'ayb-draft-form-group--article' : 'ayb-draft-form-group--opinion';
+      $element['#attributes']['id'] = 'group-taslak-' . str_replace('group_taslak_', '', $group_name);
+      $element['#open'] = $index < 2;
+      if ($is_article) {
+        $notes = [
+          'group_taslak_madde_baglam' => t('Çalışma bağlantısı: Bu bölüm maddeyi üst taslağa bağlar ve taslak içindeki konumunu belirler. Üst taslak, kayıt türü ve sıralama alanları çalışma düzenini yönetir.'),
+          'group_taslak_madde_metin' => t('Mevzuat taslağına yansıyan içerik: Buradaki madde başlığı, önerilen/nihai metin ve madde gerekçesi taslağın hukukî metnini oluşturur.'),
+          'group_taslak_madde_deg' => t('İnceleme ve çalışma bilgileri: Değişiklik türü, karşılaştırma notu, durum ve belgeler editoryal süreci izler; yalnızca ilgili alanlar nihai metne yansır.'),
+        ];
+        if (isset($notes[$group_name])) {
+          $element['ayb_draft_group_note'] = [
+            '#type' => 'html_tag', '#tag' => 'p', '#weight' => -100,
+            '#attributes' => ['class' => ['ayb-draft-form-group__note']],
+            '#value' => $notes[$group_name],
+          ];
+        }
+      }
+    });
+  }
+  if ($is_article) {
+    $descriptions = [
+      'field_taslak_madde_taslak' => t('Üst taslak, ana taslak sayfasından geldiyseniz otomatik seçilir.'),
+      'field_taslak_ust_kayit' => t('Bu kaydın ait olduğu bölüm veya başlığı seçin. Boş bırakılırsa kayıt taslağın kökünde görünür.'),
+      'field_taslak_madde_numarasi' => t('Mevcut veya önerilen madde numarasını yazın. Madde numarası değişiyorsa eski numarayı “Mevcut mevzuat maddesi” alanında belirtin.'),
+      'field_taslak_madde_sira' => t('Aynı üst bölüm içindeki sıralamayı belirler; madde numarasından bağımsızdır.'),
+      'field_taslak_madde_basligi' => t('Nihai mevzuat metninde madde numarasının yanında görünecek resmî başlıktır. Metne yansıyacak başlık budur.'),
+      'field_taslak_madde_mevcut' => t('Yalnızca mevcut mevzuat değişikliğinde ilgili yürürlükteki maddeyi seçin.'),
+      'field_taslak_kayit_turu' => t('Madde metni için “Madde”; kitap, kısım, bölüm veya alt başlık için ilgili türü; maddenin üzerinde sola hizalı başlık için “Madde başlığı” seçeneğini kullanın.'),
+      'field_taslak_bolum_basligi' => t('Kitap / kısım / bölüm / alt başlık metni. Seçilen yapısal kayıt türünün başlığını buraya yazın; bu başlık önizleme, Word ve PDF çıktısında gösterilir.'),
+      'field_taslak_madde_mevcut_metin' => t('Değişiklik senaryosunda yürürlükteki madde metnini girin; öneriyle karşılaştırılır.'),
+      'field_taslak_madde_deg_turu' => t('Örnek: yeni madde, değişiklik, mülga veya yeniden numaralandırma.'),
+      'field_taslak_madde_nihai_metin' => t('Onaydan sonra nihai mevzuat metnine işlenecek metindir. Önizlemede varsa önerilen metnin yerine bu alan kullanılır.'),
+      'field_taslak_madde_oneri_metin' => t('Henüz onaylanmamış yeni veya değiştirilmiş metindir. Nihai metin boşsa önizlemede geçici olarak gösterilir.'),
+      'field_taslak_madde_gerekcesi' => t('Madde metninde değil, maddeye ait gerekçe bölümünde gösterilir; genel gerekçeyi ana taslakta tutun.'),
+      'field_taslak_madde_karsilastirma' => t('Numara değişikliği veya eski ve yeni maddelerin eşleştirilmesi gibi ek karşılaştırma notlarını yazın.'),
+      'field_taslak_madde_durum' => t('Madde çalışmasının ilerleme durumunu seçin.'),
+      'field_taslak_madde_belge_media' => t('Bu maddeye özgü dayanak veya çalışma belgesi varsa ekleyin.'),
+    ];
+    foreach ($descriptions as $field_name => $description) {
+      ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element) use ($description): void {
+        $element['#description'] = $description;
+      });
+    }
+    foreach (['field_taslak_madde_taslak', 'field_taslak_madde_mevcut', 'field_taslak_madde_sira'] as $field_name) {
+      ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element): void {
+        $element['#attributes']['class'][] = 'ayb-draft-field--workspace';
+      });
+    }
+    ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_kayit_turu', static function (array &$element): void {
+      $element['#required'] = FALSE;
+    });
+    foreach (['field_taslak_kayit_turu', 'field_taslak_bolum_basligi', 'field_taslak_madde_numarasi', 'field_taslak_madde_basligi', 'field_taslak_madde_mevcut_metin', 'field_taslak_madde_oneri_metin', 'field_taslak_madde_nihai_metin', 'field_taslak_madde_gerekcesi'] as $field_name) {
+      ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element): void {
+        $element['#attributes']['class'][] = 'ayb-draft-field--substantive';
+      });
+    }
+    ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_madde_numarasi', static function (array &$element): void {
+      $element['#states']['required'] = [':input[name="field_taslak_kayit_turu"]' => ['value' => 'madde']];
+    });
+    ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_bolum_basligi', static function (array &$element): void {
+      $element['#title'] = t('Kitap / kısım / bölüm / alt başlık başlığı');
+      $element['#states']['required'] = ['or' => [
+        [':input[name="field_taslak_kayit_turu"]' => ['value' => 'kitap']],
+        [':input[name="field_taslak_kayit_turu"]' => ['value' => 'bolum']],
+        [':input[name="field_taslak_kayit_turu"]' => ['value' => 'kisim']],
+        [':input[name="field_taslak_kayit_turu"]' => ['value' => 'alt_baslik']],
+      ]];
+    });
+    ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_madde_basligi', static function (array &$element): void {
+      $element['#states']['required'] = [':input[name="field_taslak_kayit_turu"]' => ['value' => 'madde_basligi']];
+    });
+    $is_change_scenario = $parent && $parent->get('field_taslak_senaryosu')->value === 'degisiklik';
+    if ($parent && !$is_change_scenario) {
+      foreach (['field_taslak_madde_mevcut', 'field_taslak_madde_mevcut_metin'] as $field_name) {
+        ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element): void {
+          $element['#access'] = FALSE;
+        });
+      }
+    }
+  }
+  else {
+    $descriptions = [
+      'field_taslak_gorus_taslak' => t('Ana taslak sayfasından geldiyseniz otomatik seçilir.'),
+      'field_taslak_gorus_madde' => t('Görüş belirli bir maddeye ilişkinse seçin. Seçilen madde aynı üst taslağa bağlı olmalıdır.'),
+      'field_taslak_gorus_sunan_turu' => t('Görüş sunan kişi veya kurumun türünü seçin.'),
+      'field_taslak_gorus_sunan' => t('Kişi veya kurum adını girin; yayımlanma tercihini aşağıdaki alanda belirleyin.'),
+      'field_taslak_gorus_tarih' => t('Görüşün alındığı tarihi yazın.'),
+      'field_taslak_gorus_yontem' => t('Görüşün hangi kanaldan iletildiğini seçin.'),
+      'field_taslak_gorus_yayin_durumu' => t('Görüş kaydının yayımlanma ve anonimleştirme tercihini belirleyin.'),
+      'field_taslak_gorus_metni' => t('Sunulan görüşün asıl metni. Kişisel veya kurumsal kimlik bilgilerini yalnızca ilgili alanlarda kaydedin.'),
+      'field_taslak_gorus_onerisi' => t('Görüş sahibinin önerdiği madde veya ifade değişikliği.'),
+      'field_taslak_gorus_cevabi' => t('Görüş değerlendirilirken idarenin gerekçeli cevabını buraya girin.'),
+      'field_taslak_gorus_sonucu' => t('İdarenin değerlendirme sonucunu seçin. Kabul, kısmen kabul veya ret durumunda gerekçeli cevap zorunludur.'),
+      'field_taslak_gorus_belge_media' => t('Görüş yazısı veya ilgili eki bu kayda bağlayın.'),
+    ];
+    foreach ($descriptions as $field_name => $description) {
+      ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element) use ($description): void {
+        $element['#description'] = $description;
+      });
+    }
+  }
+  ayb_mevzuat_calisma_clear_generic_draft_descriptions($form);
+  unset($form['#ayb_mevzuat_form_index']);
+}
+
+/** Provides direct navigation between article records of one draft. */
+function ayb_mevzuat_calisma_draft_sibling_navigation(\Drupal\node\NodeInterface $node, \Drupal\node\NodeInterface $parent): array {
+  $ids = \Drupal::entityQuery('node')
+    ->accessCheck(TRUE)
+    ->condition('type', 'mevzuat_taslak_maddesi')
+    ->condition('field_taslak_madde_taslak', $parent->id())
+    ->execute();
+  $siblings = $ids ? \Drupal::entityTypeManager()->getStorage('node')->loadMultiple($ids) : [];
+  $siblings = array_values(array_filter($siblings, static fn($sibling): bool => $sibling instanceof \Drupal\node\NodeInterface && $sibling->access('update')));
+  usort($siblings, static function (\Drupal\node\NodeInterface $a, \Drupal\node\NodeInterface $b): int {
+    $a_order = is_numeric($a->get('field_taslak_madde_sira')->value) ? (float) $a->get('field_taslak_madde_sira')->value : PHP_FLOAT_MAX;
+    $b_order = is_numeric($b->get('field_taslak_madde_sira')->value) ? (float) $b->get('field_taslak_madde_sira')->value : PHP_FLOAT_MAX;
+    if ($a_order !== $b_order) {
+      return $a_order <=> $b_order;
+    }
+    return strnatcasecmp((string) $a->get('field_taslak_madde_numarasi')->value, (string) $b->get('field_taslak_madde_numarasi')->value);
+  });
+  if (!$siblings) {
+    return [];
+  }
+  $options = [];
+  foreach ($siblings as $sibling) {
+    $number = (string) $sibling->get('field_taslak_madde_numarasi')->value;
+    $number_label = ayb_mevzuat_calisma_article_number_label($parent, $number);
+    $label = $number_label !== '' ? $number_label . ' · ' . $sibling->label() : $sibling->label();
+    $options[$sibling->toUrl('edit-form')->toString()] = $label;
+  }
+  $current_url = $node->isNew() ? '' : $node->toUrl('edit-form')->toString();
+  return [
+    '#type' => 'container',
+    '#attributes' => ['class' => ['ayb-draft-sibling-navigation']],
+    'label' => ['#type' => 'html_tag', '#tag' => 'span', '#attributes' => ['class' => ['ayb-draft-sibling-navigation__label']], '#value' => t('Aynı taslağın maddesine geç')],
+    'select' => [
+      '#type' => 'select',
+      '#title' => t('Madde seçin'),
+      '#title_display' => 'invisible',
+      '#empty_option' => t('Kayıtlı madde seçin'),
+      '#options' => $options,
+      '#default_value' => $current_url,
+      '#attributes' => ['class' => ['ayb-draft-sibling-select'], 'data-ayb-draft-navigate' => '1'],
+      '#description' => t('Seçtiğiniz madde düzenleme sayfası açılır.'),
+    ],
+  ];
+}
+
+/** Shows the child moderation state together with its parent draft state. */
+function ayb_mevzuat_calisma_child_stage(\Drupal\node\NodeInterface $node, ?\Drupal\node\NodeInterface $parent): array {
+  $state = (string) ($node->get('moderation_state')->value ?: 'draft');
+  $workflow = \Drupal::service('content_moderation.moderation_information')->getWorkflowForEntity($node);
+  $state_label = $state;
+  if ($workflow && $workflow->getTypePlugin()->hasState($state)) {
+    $state_label = (string) $workflow->getTypePlugin()->getState($state)->label();
+  }
+  $parent_state = $parent && $parent->hasField('moderation_state') ? (string) ($parent->get('moderation_state')->value ?: 'draft') : '';
+  $parent_workflow = $parent ? \Drupal::service('content_moderation.moderation_information')->getWorkflowForEntity($parent) : NULL;
+  $parent_label = $parent_state;
+  if ($parent_workflow && $parent_workflow->getTypePlugin()->hasState($parent_state)) {
+    $parent_label = (string) $parent_workflow->getTypePlugin()->getState($parent_state)->label();
+  }
+  $help = match ($state) {
+    'draft' => t('Madde üzerinde çalışılıyor. Tamamlandığında “Hukukî incelemeye gönder” geçişini kullanın.'),
+    'incelemede' => t('Madde hukukî incelemede. İnceleme sonucu için madde metnini ve gerekçesini gözden geçirin.'),
+    'published' => t('Madde kabul edilmiş sürüm olarak yayımlandı; üst taslak onaylandığında nihai metne dahil edilir.'),
+    'arsiv' => t('Madde arşivlendi ve aktif taslak metninden çıkarılmıştır.'),
+    default => t('Madde durumu aşağıda gösterilmektedir.'),
+  };
+  return [
+    '#type' => 'container',
+    '#attributes' => ['class' => ['ayb-draft-child-stage'], 'role' => 'status'],
+    'state' => ['#type' => 'html_tag', '#tag' => 'strong', '#attributes' => ['class' => ['ayb-draft-child-stage__state']], '#value' => (string) t('Madde durumu: @state', ['@state' => $state_label])],
+    'parent' => $parent_label !== '' ? ['#type' => 'html_tag', '#tag' => 'span', '#attributes' => ['class' => ['ayb-draft-child-stage__parent']], '#value' => (string) t('Üst taslak: @state', ['@state' => $parent_label])] : [],
+    'help' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => $help],
+  ];
+}
+
+/** Removes the generic placeholder description from taslak workflow forms. */
+function ayb_mevzuat_calisma_clear_generic_draft_descriptions(array &$element): void {
+  foreach ($element as &$child) {
+    if (!is_array($child)) {
+      continue;
+    }
+    $description = $child['#description'] ?? NULL;
+    if ((is_string($description) || $description instanceof \Stringable)
+      && (string) $description === 'AYB hukukî bilgi modeli alanı.') {
+      $child['#description'] = '';
+    }
+    ayb_mevzuat_calisma_clear_generic_draft_descriptions($child);
+  }
+}
+
+/** Adds contextual guidance and conditional visibility to the draft form. */
+function ayb_mevzuat_calisma_enhance_draft_form(array &$form, \Drupal\node\NodeInterface $draft): void {
+  $form['#attached']['library'][] = 'ayb_mevzuat_calisma/draft';
+  $form['#attributes']['class'][] = 'ayb-draft-form';
+  $form['#attributes']['class'][] = 'ayb-draft-form--editorial';
+  $is_edit = !$draft->isNew();
+  $intro_title = $is_edit ? t('Mevzuat taslağını güncelle') : t('Yeni mevzuat taslağı oluştur');
+  $intro_text = $is_edit
+    ? t('Seçtiğiniz çalışma modeline göre taslağın ana metnini güncelleyin. Madde bazlı taslaklarda maddeler ana kaynaktır; tam metin önizlemesi bu kayıtlardan hazırlanır.')
+    : t('Önce senaryoyu, ardından çalışma modelini seçin. Tam metin seçeneğinde belgeyi tek alanda; madde bazlı seçenekte bölüm ve maddeleri ayrı kayıtlar olarak hazırlarsınız.');
+  $model = $draft->hasField('field_taslak_calisma_modeli') ? ($draft->get('field_taslak_calisma_modeli')->value ?: 'tam_metin') : 'tam_metin';
+  $has_articles = FALSE;
+  if (!$draft->isNew() && $model === 'madde_bazli') {
+    $has_articles = (bool) \Drupal::entityQuery('node')
+      ->accessCheck(FALSE)
+      ->condition('type', 'mevzuat_taslak_maddesi')
+      ->condition('field_taslak_madde_taslak', $draft->id())
+      ->range(0, 1)
+      ->execute();
+  }
+  $has_source_text = !$draft->get('field_taslak_metin')->isEmpty()
+    || !$draft->get('field_taslak_mevcut_metin')->isEmpty();
+  $model_locked = !$draft->isNew() && ($has_source_text || $has_articles);
+  $state = (string) ($draft->get('moderation_state')->value ?: 'draft');
+  $active_step = match ($state) {
+    'draft' => $is_edit && !$draft->get('field_taslak_metin')->isEmpty() ? 2 : 1,
+    'goruste' => 3,
+    'revize' => 3,
+    'incelemede' => 4,
+    'onaylandi', 'published', 'arsiv' => 4,
+    default => 1,
+  };
+  $steps = [
+    ['Künye', 'Kimlik ve kapsam'],
+    ['Metin ve gerekçe', 'İçerik çalışması'],
+    ['Görüş ve revizyon', 'Değerlendirme'],
+    ['İnceleme ve yayım', 'Karar ve sürüm'],
+  ];
+  $step_items = [];
+  foreach ($steps as $index => [$label, $description]) {
+    $number = $index + 1;
+    $classes = ['ayb-draft-step'];
+    if ($number === $active_step) {
+      $classes[] = 'is-current';
+    }
+    elseif ($number < $active_step) {
+      $classes[] = 'is-complete';
+    }
+    $step_items['step_' . $number] = [
+      '#type' => 'html_tag', '#tag' => 'li', '#attributes' => ['class' => $classes],
+      'number' => ['#type' => 'html_tag', '#tag' => 'span', '#value' => (string) $number],
+      'label' => ['#type' => 'html_tag', '#tag' => 'b', '#value' => (string) $label],
+      'description' => ['#type' => 'html_tag', '#tag' => 'small', '#value' => (string) $description],
+    ];
+  }
+  $form['ayb_draft_help'] = [
+    '#type' => 'container', '#weight' => -100, '#attributes' => ['class' => ['ayb-draft-form-intro']],
+    'eyebrow' => ['#markup' => '<div class="ayb-draft-form-intro__eyebrow">AYB mevzuat çalışma alanı</div>'],
+    'title' => ['#markup' => '<h2>' . $intro_title . '</h2>'],
+    'text' => ['#markup' => '<p>' . $intro_text . '</p>'],
+    'steps' => ['#type' => 'html_tag', '#tag' => 'ol', '#attributes' => ['class' => ['ayb-draft-form-steps'], 'aria-label' => t('Taslak hazırlama aşamaları')]] + $step_items,
+  ];
+  $form['ayb_draft_section_nav'] = ayb_mevzuat_calisma_form_section_nav();
+  if ($model === 'madde_bazli') {
+    // Keep the long instructions available on demand; they must not push the
+    // actual editing sections below the fold on the main node form.
+    $form['ayb_draft_madde_guide'] = ayb_mevzuat_calisma_madde_form_guide(TRUE, FALSE);
+    $form['ayb_draft_madde_guide']['#weight'] = -87;
+    if ($is_edit && $draft->access('update')) {
+      $destination = \Drupal::request()->getRequestUri();
+      $workspace_url = \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.workspace_draft', ['draft' => $draft->id()]);
+      $form['ayb_draft_help']['madde_actions'] = [
+        '#type' => 'container',
+        '#attributes' => ['class' => ['ayb-draft-madde-actions', 'ayb-draft-madde-actions--compact'], 'aria-label' => t('Madde çalışma işlemleri')],
+        'title' => ['#type' => 'html_tag', '#tag' => 'strong', '#value' => t('Maddelerle çalışma')],
+        'text' => ['#type' => 'html_tag', '#tag' => 'span', '#value' => $has_articles ? t('Bölüm ve maddeleri çalışma alanından yönetin.') : t('Madde kayıtlarını çalışma alanından yönetin.')],
+        'actions' => [
+          '#type' => 'container',
+          '#attributes' => ['class' => ['ayb-draft-madde-actions__links']],
+          'workspace' => ['#type' => 'link', '#title' => t('Çalışma alanını aç'), '#url' => $workspace_url, '#attributes' => ['class' => ['button', 'button--primary']]],
+        ],
+        'hint' => ['#type' => 'html_tag', '#tag' => 'small', '#value' => t('Bölüm, kısım ve maddeleri açılan çalışma alanındaki “Yeni bölüm veya madde ekle” işlemiyle oluşturun.'), '#attributes' => ['class' => ['ayb-draft-madde-actions__hint']]],
+      ];
+    }
+  }
+  if ($is_edit && $model === 'madde_bazli') {
+    $form['ayb_draft_help']['revision_actions'] = ayb_mevzuat_calisma_revision_form_actions($draft);
+  }
+  if ($model_locked) {
+    $form['ayb_draft_help']['model'] = [
+      '#type' => 'container',
+      '#attributes' => ['class' => ['ayb-draft-model-lock']],
+      'text' => ['#plain_text' => t('Çalışma modeli: @model. İçerik girildiği için bu seçim kilitlidir.', ['@model' => $model === 'madde_bazli' ? t('Madde bazlı') : t('Tam metin')])],
+    ];
+    ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_calisma_modeli', static function (array &$element): void {
+      $element['#access'] = FALSE;
+    });
+  }
+  ayb_mevzuat_calisma_update_form_element($form, 'moderation_state', static function (array &$element): void {
+    $element['#description'] = 'Kaydetme aşamasında başlangıç durumu “Hazırlık”tır. Üst aşamalara geçiş yetkili editör tarafından yapılır.';
+    $element['#attributes']['class'][] = 'ayb-draft-workflow-select';
+  });
+  foreach (['group_taslak_kunye', 'group_taslak_gerekce', 'group_taslak_metin', 'group_taslak_gorus'] as $group_name) {
+    ayb_mevzuat_calisma_update_form_element($form, $group_name, static function (array &$element) use ($group_name, $active_step): void {
+      $element['#attributes']['class'][] = 'ayb-draft-form-group';
+      $element['#attributes']['class'][] = 'ayb-draft-form-group--' . str_replace('group_taslak_', '', $group_name);
+      $element['#attributes']['id'] = 'group-taslak-' . str_replace('group_taslak_', '', $group_name);
+      $element['#open'] = match ($group_name) {
+        'group_taslak_kunye' => $active_step === 1,
+        'group_taslak_gerekce', 'group_taslak_metin' => $active_step === 2,
+        'group_taslak_gorus' => $active_step >= 3,
+        default => FALSE,
+      };
+    });
+  }
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_senaryosu', static function (array &$element): void {
+    $element['#description'] = 'Yeni bir kanun, yönetmelik veya başka bir düzenleme hazırlıyorsanız “Yeni mevzuat”ı; yürürlükteki bir metni değiştiriyorsanız “Mevcut mevzuat değişikliği”ni seçin. Bu seçim, aşağıdaki alanların hangilerinin gerekli olduğunu belirler.';
+    $element['#attributes']['class'][] = 'ayb-draft-scenario';
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_calisma_modeli', static function (array &$element) use ($model_locked): void {
+    $element['#title'] = t('Taslak çalışma modeli');
+    $element['#description'] = [
+      '#type' => 'container',
+      '#attributes' => ['class' => ['ayb-draft-model-guide']],
+      'intro' => [
+        '#type' => 'html_tag',
+        '#tag' => 'p',
+        '#attributes' => ['class' => ['ayb-draft-model-guide__intro']],
+        '#value' => t('Bu seçim, metni nerede düzenleyeceğinizi ve kayıttan sonra nasıl çalışacağınızı belirler.'),
+      ],
+      'options' => [
+        '#type' => 'container',
+        '#attributes' => ['class' => ['ayb-draft-model-guide__options']],
+        'full_text' => [
+          '#type' => 'container',
+          '#attributes' => ['class' => ['ayb-draft-model-guide__option', 'ayb-draft-model-guide__option--full']],
+          'heading' => ['#type' => 'html_tag', '#tag' => 'h3', '#value' => t('Tam metin — belgeyi tek alanda düzenleyin')],
+          'best_for' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => t('Kısa düzenlemeler veya madde madde takip gerektirmeyen metinler. Değişiklikte mevcut ve yeni metin, taslak üzerindeki metin alanlarında karşılaştırılır.')],
+          'next_step' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => t('Metni bu formdaki “Tam taslak metni” alanına girin. Kaydettikten sonra taslağın tamamını tek parça olarak gözden geçirin.')],
+        ],
+        'articles' => [
+          '#type' => 'container',
+          '#attributes' => ['class' => ['ayb-draft-model-guide__option', 'ayb-draft-model-guide__option--articles']],
+          'heading' => ['#type' => 'html_tag', '#tag' => 'h3', '#value' => t('Madde bazlı — bölümleri ve maddeleri ayrı kaydedin')],
+          'best_for' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => t('Uzun mevzuat metinleri, madde numarası değişiklikleri ve her madde için ayrı gerekçe, görüş veya karşılaştırma gereken çalışmalar.')],
+          'next_step' => ['#type' => 'html_tag', '#tag' => 'p', '#value' => t('Bu formda taslağın künyesini ve gerekçesini doldurup kaydedin; değişiklik senaryosunda etkilenen mevcut maddeleri de bağlayın. Kaydettikten sonra “Çalışma alanını aç” düğmesiyle yapıya geçin; “Yeni bölüm veya madde ekle” ile kayıtları oluşturun. Tam metin bu kayıtlardan derlenir.')],
+        ],
+      ],
+      'lock_note' => [
+        '#type' => 'html_tag',
+        '#tag' => 'p',
+        '#attributes' => ['class' => ['ayb-draft-model-guide__lock-note']],
+        '#value' => t('Çalışma modelini, metin veya madde kaydı eklemeden önce belirleyin. İlk içerik kaydedilince model değişikliği kilitlenir.'),
+      ],
+    ];
+    $element['#attributes']['class'][] = 'ayb-draft-model-selector';
+    if ($model_locked) {
+      $element['#access'] = FALSE;
+    }
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'title', static function (array &$element): void {
+    $element['#description'] = 'Taslağı arama ve yönetim listelerinde ayırt edebilmek için açık ve kısa bir başlık kullanın.';
+    $element['#attributes']['class'][] = 'ayb-draft-title-field';
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_mevzuat', static function (array &$element): void {
+    $element['#description'] = 'Yalnızca mevcut mevzuatta değişiklik yapıyorsanız doldurun. Yeni mevzuat taslağında boş bırakılır.';
+    $element['#states']['visible'] = [':input[name="field_taslak_senaryosu"]' => ['value' => 'degisiklik']];
+    $element['#states']['required'] = [':input[name="field_taslak_senaryosu"]' => ['value' => 'degisiklik']];
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_baslik_hizalama', static function (array &$element): void {
+    $element['#title'] = t('Çıktılarda başlık hizalama');
+    $element['#description'] = t('Önizleme, PDF ve Word çıktılarındaki kısım, bölüm, alt başlık ve madde başlıklarının hizasını belirler. Varsayılan seçenek türüne göre hizalar.');
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_numara_gosterim', static function (array &$element): void {
+    $element['#title'] = t('Madde numarası gösterimi');
+    $element['#description'] = t('Önizleme, İçindekiler, PDF ve Word çıktılarında madde numarasının biçimini belirler. Başlık, seçilen madde numarasının üzerinde gösterilir.');
+  });
+  foreach (['field_taslak_mevcut_metin', 'field_taslak_maddeler', 'field_taslak_fark_aciklama'] as $field_name) {
+    ayb_mevzuat_calisma_update_form_element($form, $field_name, static function (array &$element): void {
+      $element['#states']['visible'] = [':input[name="field_taslak_senaryosu"]' => ['value' => 'degisiklik']];
+    });
+  }
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_mevcut_metin', static function (array &$element): void {
+    $element['#states']['visible'][':input[name="field_taslak_calisma_modeli"]'] = ['value' => 'tam_metin'];
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_metin', static function (array &$element) use ($draft): void {
+    $element['#title'] = t('Tam taslak metni');
+    $element['#description'] = t('Yalnızca “Tam metin” modelinde kullanılır. “Madde bazlı” modelde bölüm ve madde kayıtları ana kaynaktır; bu alan gizlenir.');
+    $element['#states']['visible'] = [':input[name="field_taslak_calisma_modeli"]' => ['value' => 'tam_metin']];
+
+    // Put revision tools beside the text editor, where editors need them.
+    // Native details/summary keeps the menu keyboard and screen-reader friendly.
+    if (!$draft->isNew()
+      && $draft->hasField('field_taslak_calisma_modeli')
+      && $draft->get('field_taslak_calisma_modeli')->value === 'tam_metin'
+      && \Drupal::currentUser()->hasPermission('view all revisions')) {
+      $history_url = \Drupal\Core\Url::fromRoute('entity.node.version_history', ['node' => $draft->id()])->toString();
+      $compare_url = \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.revision_compare', ['node' => $draft->id()])->toString();
+      $preview_url = \Drupal\Core\Url::fromRoute('ayb_mevzuat_calisma.draft_preview', ['node' => $draft->id()])->toString();
+      $revision_options = \Drupal\Component\Utility\Html::escape(json_encode(['width' => 1040, 'classes' => ['ui-dialog' => 'ayb-draft-revision-dialog']], JSON_UNESCAPED_SLASHES));
+      $preview_options = \Drupal\Component\Utility\Html::escape(json_encode(['resizable' => TRUE, 'minWidth' => 720, 'width' => 1120, 'classes' => ['ui-dialog' => 'ayb-draft-drawer-dialog ayb-draft-preview-dialog']], JSON_UNESCAPED_SLASHES));
+      $element['#attached']['library'][] = 'core/drupal.dialog.ajax';
+      $element['#attached']['library'][] = 'ayb_mevzuat_calisma/draft';
+      $element['#prefix'] = ($element['#prefix'] ?? '') . '<div class="ayb-draft-revision-layout"><div class="ayb-draft-revision-layout__editor">';
+      $element['#suffix'] = ($element['#suffix'] ?? '')
+        . '</div><details class="ayb-draft-revision-menu">'
+        . '<summary>' . \Drupal\Component\Utility\Html::escape((string) t('Sürümler')) . '</summary>'
+        . '<p>' . \Drupal\Component\Utility\Html::escape((string) t('Metnin güncel görünümünü veya önceki sürümlerini inceleyin.')) . '</p>'
+        . '<ul class="ayb-draft-revision-menu__actions">'
+        . '<li><a class="use-ajax ayb-draft-revision-menu__button ayb-draft-revision-menu__button--preview" href="' . \Drupal\Component\Utility\Html::escape($preview_url) . '" data-dialog-type="modal" data-dialog-options="' . $preview_options . '"><span aria-hidden="true">▤</span>' . \Drupal\Component\Utility\Html::escape((string) t('Önizlemeyi aç')) . '</a></li>'
+        . '<li><a class="use-ajax ayb-draft-revision-menu__button" href="' . \Drupal\Component\Utility\Html::escape($history_url) . '" data-dialog-type="modal" data-dialog-options="' . $revision_options . '"><span aria-hidden="true">↺</span>' . \Drupal\Component\Utility\Html::escape((string) t('Revizyon geçmişi')) . '</a></li>'
+        . '<li><a class="use-ajax ayb-draft-revision-menu__button" href="' . \Drupal\Component\Utility\Html::escape($compare_url) . '" data-dialog-type="modal" data-dialog-options="' . $revision_options . '"><span aria-hidden="true">⇄</span>' . \Drupal\Component\Utility\Html::escape((string) t('Sürümleri karşılaştır')) . '</a></li>'
+        . '</ul>'
+        . '</details></div>';
+    }
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_nihai_metin', static function (array &$element): void {
+    $element['#states']['visible'] = [':input[name="field_taslak_calisma_modeli"]' => ['value' => 'tam_metin']];
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_maddeler', static function (array &$element): void {
+    $element['#description'] = 'Yalnızca değişiklik senaryosunda doldurulur. Değişiklikten etkilenen yürürlükteki maddeleri seçin. Önerilen yeni madde metinlerini taslağı kaydettikten sonra “Madde çalışmaları” bölümünden ayrı kayıtlar olarak ekleyin.';
+    $element['#states']['visible'] = [':input[name="field_taslak_senaryosu"]' => ['value' => 'degisiklik']];
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_fark_aciklama', static function (array &$element): void {
+    $element['#description'] = 'Mevcut metne göre hangi düzenlemenin neden önerildiğini kısaca açıklayın.';
+  });
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_sonuc', static function (array &$element): void {
+    $element['#description'] = 'Taslağın nihai kararını yalnızca yetkili inceleme veya onay aşamasında belirtin.';
+  });
+  ayb_mevzuat_calisma_clear_generic_draft_descriptions($form);
+  unset($form['#ayb_mevzuat_form_index']);
+}
+
+/** Updates a field widget even when Field Group has nested the widget. */
+function ayb_mevzuat_calisma_update_form_element(array &$element, string $field_name, callable $callback): bool {
+  // The editorial form contains deeply nested Field Group render arrays and
+  // calls this helper many times. Build a path index once per form so each
+  // subsequent update does not recursively scan the complete form again.
+  if (!isset($element['#ayb_mevzuat_form_index']) || !is_array($element['#ayb_mevzuat_form_index'])) {
+    $index = [];
+    ayb_mevzuat_calisma_build_form_index($element, $index);
+    $element['#ayb_mevzuat_form_index'] = $index;
+  }
+  $path = $element['#ayb_mevzuat_form_index'][$field_name] ?? NULL;
+  if ($path === NULL) {
+    return FALSE;
+  }
+  $target =& $element;
+  foreach ($path as $key) {
+    if (!isset($target[$key]) || !is_array($target[$key])) {
+      return FALSE;
+    }
+    $target =& $target[$key];
+  }
+  $callback($target);
+  foreach (['#description', '#title'] as $property) {
+    if (isset($target[$property])) {
+      ayb_mevzuat_calisma_sync_widget_property($target, $property, $target[$property]);
+    }
+  }
+  return TRUE;
+}
+
+/** Indexes nested form elements by their first matching field/key path. */
+function ayb_mevzuat_calisma_build_form_index(array &$element, array &$index, array $path = []): void {
+  foreach ($element as $key => &$child) {
+    if (!is_array($child) || str_starts_with((string) $key, '#')) {
+      continue;
+    }
+    $child_path = [...$path, $key];
+    $is_field_key = isset($child['#type'])
+      && !in_array($child['#type'], ['html_tag', 'markup', 'value', 'hidden'], TRUE);
+    $field_name = $child['#field_name'] ?? ($is_field_key ? $key : NULL);
+    if (is_string($field_name) && $field_name !== '' && !isset($index[$field_name])) {
+      $index[$field_name] = $child_path;
+    }
+    ayb_mevzuat_calisma_build_form_index($child, $index, $child_path);
+  }
+}
+
+/** Propagates field labels/descriptions to the actual nested widget element. */
+function ayb_mevzuat_calisma_sync_widget_property(array &$element, string $property, mixed $value): void {
+  foreach ($element as $key => &$child) {
+    if (!is_array($child)) {
+      continue;
+    }
+    if (str_starts_with((string) $key, '#')) {
+      continue;
+    }
+    if (array_key_exists($property, $child)) {
+      $child[$property] = $value;
+    }
+    ayb_mevzuat_calisma_sync_widget_property($child, $property, $value);
+  }
+}
+
+/** Implements hook_field_group_form_process_build_alter(). */
+function ayb_mevzuat_calisma_field_group_form_process_build_alter(array &$element, ?\Drupal\Core\Form\FormStateInterface $form_state = NULL, array &$complete_form = []): void {
+  $form_object = $form_state?->getFormObject();
+  if (!$form_object || !method_exists($form_object, 'getEntity')) {
+    return;
+  }
+  $node = $form_object->getEntity();
+  if (!$node instanceof \Drupal\node\NodeInterface) {
+    return;
+  }
+  $groups = [];
+  if ($node->bundle() === 'mevzuat_taslagi') {
+    $state = (string) ($node->get('moderation_state')->value ?: 'draft');
+    $has_text = !$node->get('field_taslak_metin')->isEmpty();
+    $groups = [
+      'group_taslak_kunye' => [$state === 'draft' && !$has_text],
+      'group_taslak_gerekce' => [$state === 'draft' && $has_text],
+      'group_taslak_metin' => [$state === 'draft' && $has_text],
+      'group_taslak_gorus' => [in_array($state, ['goruste', 'revize', 'incelemede', 'onaylandi', 'published'], TRUE)],
+    ];
+  }
+  elseif ($node->bundle() === 'mevzuat_taslak_maddesi') {
+    $parent = $node->get('field_taslak_madde_taslak')->entity;
+    $is_change = $parent && $parent->get('field_taslak_senaryosu')->value === 'degisiklik';
+    $groups = [
+      'group_taslak_madde_baglam' => [TRUE],
+      'group_taslak_madde_metin' => [TRUE],
+      'group_taslak_madde_deg' => [$is_change || !$node->isNew()],
+    ];
+  }
+  elseif ($node->bundle() === 'mevzuat_taslak_gorusu') {
+    $groups = [
+      'group_taslak_gorus_baglam' => [TRUE],
+      'group_taslak_gorus_kayit' => [TRUE],
+      'group_taslak_gorus_degerlendirme' => [!$node->isNew() && (!$node->get('field_taslak_gorus_cevabi')->isEmpty() || !$node->get('field_taslak_gorus_sonucu')->isEmpty())],
+    ];
+  }
+  foreach ($groups as $group_name => [$open]) {
+    if (isset($element[$group_name])) {
+      $element[$group_name]['#open'] = $open;
+      $element[$group_name]['#attributes']['class'][] = 'ayb-draft-form-group';
+      $element[$group_name]['#attributes']['class'][] = 'ayb-draft-form-group--' . str_replace('group_taslak_', '', $group_name);
+    }
+  }
+}
+

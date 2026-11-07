@@ -1,0 +1,61 @@
+@media print {
+  .toolbar,
+  .admin-toolbar,
+  .region-header,
+  .region-primary-menu,
+  .region-secondary-menu,
+  .region-footer,
+  .breadcrumb,
+  .ayb-legislation-workspace__header-actions,
+  .ayb-legislation-workspace__tree,
+  .ayb-legislation-workspace__inspector,
+  .ayb-draft-workspace__actions,
+  .ayb-draft-section-nav,
+  .ayb-draft-form-section-nav,
+  .ayb-draft-page .ayb-draft-article-card__actions,
+  .ayb-draft-page .ayb-draft-related-item__edit,
+  .ayb-draft-page .ayb-draft-related-item__all,
+  .ayb-draft-page .ayb-draft-add,
+  .contextual,
+  .tabs,
+  .messages {
+    display: none !important;
+  }
+  body,
+  .layout-container,
+  .region-content,
+  main,
+  .ayb-legislation-workspace,
+  .ayb-legislation-workspace__document,
+  .ayb-draft-page {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+    color: #000 !important;
+  }
+  .ayb-legislation-workspace__document,
+  .ayb-draft-page .field__item,
+  .ayb-draft-page .ayb-draft-article-card__body {
+    font-size: 10.5pt;
+    line-height: 1.55;
+  }
+  .ayb-legislation-workspace__document > h3,
+  .ayb-draft-page h1,
+  .ayb-draft-page h2,
+  .ayb-draft-page h3 {
+    break-after: avoid;
+    color: #000 !important;
+  }
+  .ayb-draft-page .ayb-draft-section,
+  .ayb-legislation-workspace__document-section,
+  .ayb-draft-page .ayb-draft-article-card {
+    break-inside: avoid;
+  }
+  @page {
+    size: A4;
+    margin: 18mm 16mm 18mm 16mm;
+  }
+}

@@ -1,0 +1,18 @@
+<nav{{ attributes.addClass('ayb-draft-context-navigation') }} aria-label="{{ 'Taslak çalışma gezinmesi'|t }}">
+  <div class="ayb-draft-context-navigation__top">
+    {% if home_url %}
+      <a class="ayb-draft-context-navigation__home" href="{{ home_url }}">{{ 'Taslaklar'|t }}</a>
+    {% endif %}
+    <div class="ayb-draft-context-navigation__identity">
+      <span class="ayb-draft-context-navigation__subtitle">{{ subtitle }}</span>
+      <strong class="ayb-draft-context-navigation__title">{{ title }}</strong>
+      {% if meta %}{{ meta }}{% endif %}
+    </div>
+    {% if actions %}
+      <div class="ayb-draft-context-navigation__actions">{{ actions }}</div>
+    {% endif %}
+  </div>
+  {% if tabs %}
+    <div class="ayb-draft-context-navigation__tabs">{{ tabs }}</div>
+  {% endif %}
+</nav>

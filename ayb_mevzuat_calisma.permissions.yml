@@ -1,0 +1,19 @@
+administer ayb legal information:
+  title: 'AYB hukukî bilgi modelini yönetme'
+  description: 'Mevzuat maddeleri, taslakları, değişiklikleri, yargı kararları ve hukukî yayın yönetim ekranlarına erişir.'
+  restrict access: true
+access ayb drafting workspace:
+  title: 'AYB mevzuat taslağı çalışma alanına erişme'
+  description: 'Mevzuat taslaklarını, madde çalışmalarını ve görüş sürecini çalışma alanından yönetir.'
+
+manage ayb draft suggestions:
+  title: 'AYB taslak önerilerini yönetme'
+  description: 'Madde önerilerini görüntüler, kabul eder, reddeder ve metne uygular.'
+create ayb draft snapshots:
+  title: 'Mevzuat taslağı anlık görüntüsü oluşturma'
+  description: 'Çalışma ekibi için sabit editoryal sürüm oluşturur.'
+  restrict access: true
+publish ayb draft snapshots:
+  title: 'Mevzuat taslağı sürümünü kamuya açma'
+  description: 'Editoryal sürümü anonim ziyaretçilerin erişimine açar veya geri çeker.'
+  restrict access: true

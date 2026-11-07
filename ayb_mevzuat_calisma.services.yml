@@ -1,0 +1,22 @@
+services:
+  ayb_mevzuat_calisma.snapshot:
+    class: Drupal\ayb_mevzuat_calisma\Service\DraftSnapshotManager
+    arguments: ['@database', '@entity_type.manager', '@current_user']
+  ayb_mevzuat_calisma.hierarchy:
+    class: Drupal\ayb_mevzuat_calisma\Service\DraftHierarchyManager
+  ayb_mevzuat_calisma.diff:
+    class: Drupal\ayb_mevzuat_calisma\Service\DraftDiffService
+  ayb_mevzuat_calisma.lock:
+    class: Drupal\ayb_mevzuat_calisma\Service\DraftLockManager
+    arguments: ['@keyvalue.expirable', '@current_user']
+  ayb_mevzuat_calisma.context_navigation:
+    class: Drupal\ayb_mevzuat_calisma\Service\DraftContextNavigationBuilder
+    arguments: ['@current_user']
+  ayb_mevzuat_calisma.workspace_breadcrumb:
+    class: Drupal\ayb_mevzuat_calisma\Breadcrumb\DraftWorkspaceBreadcrumbBuilder
+    tags:
+      - { name: breadcrumb_builder, priority: 110 }
+  ayb_mevzuat_calisma.legacy_views_route_subscriber:
+    class: Drupal\ayb_mevzuat_calisma\RouteSubscriber\LegacyDraftViewsRouteSubscriber
+    tags:
+      - { name: event_subscriber }

@@ -1,0 +1,11 @@
+<div class="ayb-draft-workspace-toolbar" aria-label="{{ 'Taslak çalışma araçları'|t }}">
+  <div class="ayb-draft-workspace-toolbar__identity">
+    <span>{{ kind }}</span>
+  </div>
+  {% if metadata %}
+    {{ metadata }}
+  {% endif %}
+  {% if actions %}
+    {{ actions }}
+  {% endif %}
+</div>
