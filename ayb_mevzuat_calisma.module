@@ -1105,7 +1105,7 @@ function ayb_mevzuat_calisma_enhance_draft_form(array &$form, \Drupal\node\NodeI
           '#attributes' => ['class' => ['ayb-draft-madde-actions__links']],
           'workspace' => ['#type' => 'link', '#title' => t('Çalışma alanını aç'), '#url' => $workspace_url, '#attributes' => ['class' => ['button', 'button--primary']]],
         ],
-        'hint' => ['#type' => 'html_tag', '#tag' => 'small', '#value' => t('Bölüm, kısım ve maddeleri açılan çalışma alanındaki “Yeni bölüm veya madde ekle” işlemiyle oluşturun.'), '#attributes' => ['class' => ['ayb-draft-madde-actions__hint']]],
+        'hint' => ['#type' => 'html_tag', '#tag' => 'small', '#value' => t('Madde bazlı modelde taslak ve nihai metin, çalışma alanındaki bölüm ve madde kayıtlarından oluşur; metni bu formda tekrar girmeyin.'), '#attributes' => ['class' => ['ayb-draft-madde-actions__hint']]],
       ];
     }
   }
@@ -1206,13 +1206,22 @@ function ayb_mevzuat_calisma_enhance_draft_form(array &$form, \Drupal\node\NodeI
       $element['#states']['visible'] = [':input[name="field_taslak_senaryosu"]' => ['value' => 'degisiklik']];
     });
   }
-  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_mevcut_metin', static function (array &$element): void {
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_mevcut_metin', static function (array &$element) use ($model): void {
     $element['#states']['visible'][':input[name="field_taslak_calisma_modeli"]'] = ['value' => 'tam_metin'];
+    if ($model === 'madde_bazli') {
+      $element['#access'] = FALSE;
+    }
   });
-  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_metin', static function (array &$element) use ($draft): void {
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_metin', static function (array &$element) use ($draft, $model): void {
     $element['#title'] = t('Tam taslak metni');
     $element['#description'] = t('Yalnızca “Tam metin” modelinde kullanılır. “Madde bazlı” modelde bölüm ve madde kayıtları ana kaynaktır; bu alan gizlenir.');
     $element['#states']['visible'] = [':input[name="field_taslak_calisma_modeli"]' => ['value' => 'tam_metin']];
+    if ($model === 'madde_bazli') {
+      // Server-side access ensures an existing article-based draft never
+      // presents an editable duplicate of its generated document text.
+      $element['#access'] = FALSE;
+      return;
+    }
 
     // Put revision tools beside the text editor, where editors need them.
     // Native details/summary keeps the menu keyboard and screen-reader friendly.
@@ -1240,8 +1249,15 @@ function ayb_mevzuat_calisma_enhance_draft_form(array &$form, \Drupal\node\NodeI
         . '</details></div>';
     }
   });
-  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_nihai_metin', static function (array &$element): void {
+  ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_nihai_metin', static function (array &$element) use ($model): void {
+    $element['#title'] = t('Nihai metin');
+    $element['#description'] = t('Tam metin modelinde onaylanan son metindir. Madde bazlı modelde nihai metin, onaylanan madde kayıtlarından oluşturulur.');
     $element['#states']['visible'] = [':input[name="field_taslak_calisma_modeli"]' => ['value' => 'tam_metin']];
+    if ($model === 'madde_bazli') {
+      // In article-based drafts the approved article revisions are the source
+      // of truth; keep this legacy aggregate field out of the edit form.
+      $element['#access'] = FALSE;
+    }
   });
   ayb_mevzuat_calisma_update_form_element($form, 'field_taslak_maddeler', static function (array &$element): void {
     $element['#description'] = 'Yalnızca değişiklik senaryosunda doldurulur. Değişiklikten etkilenen yürürlükteki maddeleri seçin. Önerilen yeni madde metinlerini taslağı kaydettikten sonra “Madde çalışmaları” bölümünden ayrı kayıtlar olarak ekleyin.';
